@@ -8,7 +8,7 @@ kp:
 	docker kill $$(docker ps -a -q --filter ancestor=postgres) && docker container prune
 
 up:
-	dbmate up && docker exec local-postgres pg_dump mydb > ./db/schema.sql
+	dbmate up && docker exec local-postgres pg_dump --inserts mydb > ./db/schema.sql
 
 down:
-	dbmate down && docker exec local-postgres pg_dump mydb > ./db/schema.sql
+	dbmate down && docker exec local-postgres pg_dump --inserts mydb > ./db/schema.sql
