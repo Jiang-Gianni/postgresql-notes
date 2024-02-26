@@ -4,6 +4,20 @@
   - [Explain Analyze Buffers Verbose](#explain-analyze-buffers-verbose)
   - [Listen JSON](#listen-json)
   - [Json with CTE](#json-with-cte)
+  - [Constraints (citusdata)](#constraints-citusdata)
+  - [Generate Series](#generate-series)
+  - [Returning](#returning)
+  - [Time Zone](#time-zone)
+  - [Advanced Postgres Schema Design](#advanced-postgres-schema-design)
+  - [Check item dependencies](#check-item-dependencies)
+  - [Identifying Slow Queries and Fixing Them](#identifying-slow-queries-and-fixing-them)
+  - [Window Functions](#window-functions)
+  - [Index](#index)
+  - [Constraints](#constraints)
+  - [PL/pgSQL](#plpgsql)
+  - [Shadow table](#shadow-table)
+  - [UPSERT](#upsert)
+  - [Monitoring](#monitoring)
 
 # postgresql-notes
 Notes about PostgreSQL and Go
@@ -20,6 +34,10 @@ docker run --rm -it --name local-postgres -p 5432:5432 -e POSTGRES_PASSWORD=my-s
 Connection string:
 
 **postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable**
+
+```bash
+psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable
+```
 
 Using [**dbmate**](https://github.com/amacneil/dbmate) for migrations:
 
@@ -61,7 +79,12 @@ explain (analyze, buffers, verbose)
 rollback;
 ```
 
-explain analyze actually executes the query, so any update/delete/create will persists
+explain analyze actually executes the query, so any update/delete/create will persist
+
+Other tools with explain:
+
+* https://explain.depesz.com/
+* https://github.com/mgartner/pg_flame
 
 
 ## Listen JSON
@@ -96,6 +119,10 @@ Cons: only pub-sub (no queue) and might be harder to debug.
 https://tapoueh.org/blog/2018/01/exporting-a-hierarchy-in-json-with-recursive-queries/
 
 See [**SQL file**](./db/migrations/20240221212444_jsonWithCTE.sql)
+
+```bash
+go run cmd/jsonWithCTE/!(*_test).go
+```
 
 Table:
 
@@ -157,7 +184,8 @@ with recursive dndclasses_from_parents as
 -- Finally, the traversal being done, we can aggregate
 -- the top-level classes all into the same JSON document,
 -- an array.
-select jsonb_pretty(jsonb_agg(js))
+-- select jsonb_pretty(jsonb_agg(js))
+select jsonb_agg(js)
   from dndclasses_from_children
  where parent_id IS NULL;
 ```
@@ -165,5 +193,886 @@ select jsonb_pretty(jsonb_agg(js))
 Output:
 
 ```json
-[ { "Name": "Priest", "Sub Classes": [ { "Name": "Cleric" }, { "Name": "Druid" }, { "Name": "Priest of specific mythos" } ] }, { "Name": "Rogue", "Sub Classes": [ { "Name": "Thief" }, { "Name": "Bard" } ] }, { "Name": "Wizard", "Sub Classes": [ { "Name": "Mage" }, { "Name": "Specialist wizard" } ] }, { "Name": "Warrior", "Sub Classes": [ { "Name": "Fighter" }, { "Name": "Paladin" }, { "Name": "Ranger" }, { "Name": "Assassin" } ] } ]
+[{"Name": "Priest", "Sub Classes": [{"Name": "Cleric"}, {"Name": "Druid"}, {"Name": "Priest of specific mythos"}]}, {"Name": "Rogue", "Sub Classes": [{"Name": "Thief"}, {"Name": "Bard"}]}, {"Name": "Wizard", "Sub Classes": [{"Name": "Mage"}, {"Name": "Specialist wizard"}]}, {"Name": "Warrior", "Sub Classes": [{"Name": "Fighter"}, {"Name": "Paladin"}, {"Name": "Ranger"}]}, {"Name": "Rogue", "Sub Classes": {"Name": "Thief", "Sub Classes": [{"Name": "Assassin"}]}}]
+```
+
+Depending on the conditions, using SQL to process and filter the data can be more performant than fetching all the data and processing from the application side as it can avoid transfering too much data over the network.
+
+In this case there are only 15 rows in the table and (at least compared to executing the previous query on a Docker contained PostgreSQL instance) processing everything from the go server ([**see code here**](./cmd/jsonWithCTE/server.go#L52)) seems faster (although more memory is used).
+
+```bash
+╰─ go test -bench=. ./cmd/jsonWithCTE -benchmem
+goos: linux
+goarch: amd64
+pkg: github.com/Jiang-Gianni/postgresql-notes/cmd/jsonWithCTE
+cpu: AMD Ryzen 5 5600G with Radeon Graphics
+BenchmarkDatabase-12                1656            680454 ns/op           22450 B/op        185 allocs/op
+BenchmarkApplication-12             2667            415754 ns/op           24268 B/op        262 allocs/op
+PASS
+ok      github.com/Jiang-Gianni/postgresql-notes/cmd/jsonWithCTE        2.365s
+```
+
+
+## Constraints (citusdata)
+
+https://www.citusdata.com/blog/2018/03/19/postgres-database-constraints/
+
+Check constraints can be set with refererence to other columns:
+
+```sql
+CREATE TABLE products (
+    product_no integer,
+    name text,
+    price numeric CHECK (price > 0),
+    sale_price numeric CHECK (sale_price > 0),
+    CHECK (price > sale_price)
+);
+```
+
+or even functions:
+
+```sql
+CREATE OR REPLACE FUNCTION is_fib(i int) RETURNS boolean AS $$
+DECLARE
+ a integer := 5*i*i+4;
+ b integer := 5*i*i-4;
+ asq integer;
+ bsq integer;
+BEGIN
+IF i <= 0 THEN RETURN false; END IF;
+ asq = sqrt(a)::int;
+ bsq = sqrt(b)::int;
+ RETURN asq*asq=a OR bsq*bsq=b;
+end
+$$ LANGUAGE plpgsql IMMUTABLE STRICT;
+
+CREATE TABLE onlyfib( i int CHECK (is_fib(i)) );
+```
+
+Exclusion:
+
+```sql
+CREATE TABLE billings_citus (
+ id uuid NOT NULL,
+ period tstzrange NOT NULL,
+ price_per_month integer NOT NULL
+);
+
+ALTER TABLE billings_citus
+ADD CONSTRAINT billings_excl
+EXCLUDE USING gist (
+ id WITH =,
+ period WITH &&
+);
+```
+
+
+## Generate Series
+
+The Art of PostgreSQL (Chapter 13)
+
+```sql
+select date::date,
+    extract('isodow' from date) as dow,
+    to_char(date, 'dy') as day,
+    extract('isoyear' from date) as "iso year",
+    extract('week' from date) as week,
+    extract('day' from
+        (date + interval '2 month - 1 day')
+    ) as feb,
+    extract('year' from date) as year,
+    extract('day' from
+        (date + interval '2 month - 1 day')
+    ) = 29 as leap
+from generate_series(
+    date '2000-01-01',
+    date '2010-01-01',
+    interval '1 year'
+    ) as t(date);
+```
+
+https://www.postgresql.org/docs/current/sql-expressions.html
+
+```sql
+select
+    count(*) as unfiltered,
+    count(*) filter (where i < 5) as filtered
+from generate_series(1,10) as s(i);
+
+select array_agg(seq) filter (where mod(seq,2) = 0) from generate_series(0,10) t(seq);
+
+select string_agg(seq::text, '-' order by seq) from generate_series(0,10) t(seq);
+
+select percentile_cont(0.37) within group (order by seq*1.2) from generate_series(0,123) t(seq);
+
+select seq from generate_series(3.2, 0.7, -0.3) t(seq);
+
+select seq from generate_series(timestamp '2000-01-01 00:00', timestamp '2000-01-01 23:00', interval '1 hour') as t(seq);
+select seq from generate_series(timestamp '2000-01-01 00:00', timestamp '2000-01-01 01:00', interval '1 minute') as t(seq);
+```
+
+
+## Returning
+
+https://di.nmfay.com/postgres-vs-mysql
+
+`returning` allows to use the inserted, updated and deleted data inside a single CTE, making it easier to reference the values
+
+```sql
+start transaction;
+with
+deleted_rows as (
+    delete from dndclasses where id in (14,15) returning *
+),
+updated_rows as (
+    update dndclasses a
+    set name = concat(deleted_rows.name, ' has been deleted')
+    from deleted_rows
+    where a.id = deleted_rows.parent_id
+    returning a.*
+),
+inserted_rows as(
+    insert into dndclasses
+    select updated_rows.id + 1234, updated_rows.id, 'Inserted Name' from updated_rows
+    returning *
+)
+select * from deleted_rows
+union all
+select * from updated_rows
+union all
+select * from inserted_rows
+;
+rollback;
+```
+
+## Time Zone
+
+https://tapoueh.org/blog/2018/04/postgresql-data-types-date-timestamp-and-time-zones/
+
+Use timestamps WITH time zones (column type **timestamptz**): there no additional memory cost since PostgreSQL defaults to using bigint internally to store timestamps.
+
+```sql
+select pg_column_size(timestamp without time zone 'now'),
+       pg_column_size(timestamp with time zone 'now');
+```
+
+## Advanced Postgres Schema Design
+
+https://www.youtube.com/watch?v=lkWiyEe2RUQ
+
+* use column type `uuid` instead of `text` since it requires less memory and it has some default checks
+* order columns from largest to smallest in size to improve data aligment memory usage (like in C or in Go structs)
+
+```sql
+-- first byte is a boolean and is followed by 7 empty bytes because big int (next column) requires 8 bytes
+-- (the memory location for datatype can't be random)
+create table bad_aligment( a boolean, b bigint, c boolean, d bigint, e boolean, f bigint );
+
+-- here it is even possible to add 5 trailing boolean columns without adding any extra disk space
+create table good_aligment( b bigint, d bigint, e bigint, a boolean, c boolean, f boolean );
+
+insert into bad_aligment select true, 1, false, 2, true, 1 from generate_series(1, 1000000);
+insert into good_aligment select 2, 1, 1, true, false, true from generate_series(1, 1000000);
+
+select
+-- bad_aligment: [(1+7 {empty bytes} ) + 8] * 3 = 48
+pg_size_pretty( pg_total_relation_size('bad_aligment') ),
+-- good_aligment: [8 * 3] + 8 {because all 3 booleans are inside the same memory slice of 8 bytes } = 32
+pg_size_pretty( pg_total_relation_size('good_aligment') )
+;
+-- 73 MB	57 MB: difference is 16 MB -> 1000000 bytes
+```
+
+* check constraints
+```sql
+create table person(
+  name text not null,
+  firstId bigint,
+  secondId bigint
+  -- Regexp
+  constraint name_regexp check (name ~* '^[a-z][a-z0-9_]+[a-z0-9]$'),
+  constraint exactly_one_id check ((firstId is null) != (secondId is null))
+);
+-- Error: pq: new row for relation "person" violates check constraint "name_regexp"
+insert into person values ('1myName', 1, null);
+-- Error: pq: new row for relation "person" violates check constraint "exactly_one_id"
+insert into person values ('myName', null, null);
+```
+
+* array checks
+```sql
+create or replace function array_sort(anyarray)
+  returns anyarray as
+  $body$
+    select array_agg(elem order by elem) from unnest($1) as elem;
+  $body$
+language sql immutable;
+
+create table foo(
+  some_array text[] not null,
+  constraint only_one_dim
+    check(array_ndims(some_array) = 1),
+  constraint ordered
+    check(some_array = array_sort(some_array))
+);
+-- Error: pq: new row for relation "foo" violates check constraint "only_one_dim"
+insert into foo values  ('{{foo, bar}, {bar, bam}}'::text[]);
+-- Error: pq: new row for relation "foo" violates check constraint "ordered"
+insert into foo values  ('{foo, bar}'::text[]);
+```
+* partial index and include index
+```sql
+-- Useful when selecting active rows
+create index foo_idx_active on foo(bar_id) where active;
+-- Useful when selecting a, b and c where the condition is checked on a
+create index foo_idx_include on foo(a) include (b, c);
+
+create unique index foo_idx_lower on foo(lower(name)) where active;
+```
+
+## Check item dependencies
+
+pg_class, pg_attribute, pg_constraint, pg_depend, pg_rewrite, pg_index, pg_trigger
+
+[Information Schema](https://www.postgresql.org/docs/current/information-schema.html)
+
+
+## Identifying Slow Queries and Fixing Them
+
+https://www.youtube.com/watch?v=_waM0GsH4HY
+
+https://www.postgresql.org/docs/current/sql-prepare.html
+
+* **DELETE with FOREIGN KEY**: a delete on the parent table will cause a scan on the child table to check the constraint, so an index on the referring side is recommended
+
+* **prepare statement**
+
+*A prepared statement is a server-side object that can be used to optimize performance.*
+
+*Prepared statements only last for the duration of the current database session*
+
+*Prepared statements potentially have the largest performance advantage when a single session is being used to execute a large number of similar statements.*
+
+```sql
+prepare stmt(int) as select * from dndclasses where id = $1;
+execute stmt(2);
+explain (analyze, verbose, buffers, format json) execute stmt(13);
+deallocate stmt;
+```
+
+* **select * from table**: large values over 2K are stored out of line in a side table and requires more time to pull back
+
+* **select distinct * from a, b, c where a.x = b.x**: check if an extra join would yield the same result because distinct implies sort and unique operations (and prefer using join syntax over comma join)
+
+* **select * from x where myid in (select myid from bigtable)**: a join can be more performant and allow for more options (large value set for a in list is parsed slower than an array)
+
+* **select * from x where myid not in (select myid from bigtable)**: better to use a left join or NOT EXISTS
+
+* **index**: check the explain analysis that the query uses the (partial) index. Drop any unused index.
+
+
+## Window Functions
+
+https://www.youtube.com/watch?v=D8Q4n6YXdpk
+
+https://www.youtube.com/watch?v=blHEnrYwySE
+
+https://gist.github.com/IllusiveMilkman/70c319d60756b78dc11366ffdb5127b3
+
+https://www.postgresql.org/docs/current/functions-window.html
+
+```sql
+select
+*,
+count(*) over() as total,
+count(*) over(partition by dept_name) as dept_total,
+max(salary_amt) over(partition by dept_name) as max_dept_salary,
+avg(salary_amt) over(partition by dept_name)::decimal(8,2) as avg_dept_salary,
+sum(salary_amt) over(partition by dept_name)::decimal(8,2) as tot_dept_salary,
+sum(case when mod(emp_no, 2) = 0 then 1 else 0 end) over(partition by dept_name) as custom
+from Payroll
+-- where dept_name = 'IT'
+;
+
+select
+*,
+count(*) over() as total,
+count(*) over(partition by dept_name) as dept_total,
+max(salary_amt) over(partition by dept_name) as max_dept_salary,
+-- use alias window w
+avg(salary_amt) over w ::decimal(8,2) as avg_dept_salary,
+sum(salary_amt) over w ::decimal(8,2)  as tot_dept_salary,
+sum(case when mod(emp_no, 2) = 0 then 1 else 0 end) over(partition by dept_name) as custom
+from Payroll
+-- define w window here
+window w as (partition by dept_name)
+-- where dept_name = 'IT'
+;
+```
+
+```sql
+SELECT
+	*,
+	(salary_amt / (SUM(salary_amt) OVER (PARTITION BY dept_name)) * 100)::DECIMAL(18,2) AS Dept_Percentage,
+	(salary_amt / (SUM(salary_amt) OVER () ) * 100)::DECIMAL(18,2) AS Company_Percentage
+FROM Payroll
+ORDER BY dept_name, dept_percentage;
+```
+
+
+```sql
+SELECT
+	*,
+	-- Note the difference between row_number and the emp_no in terms of when it was captured.
+	ROW_NUMBER() OVER () AS "Base Row No",
+	-- No Partition, just an ORDER BY, thus the whole base resultset is used.
+	ROW_NUMBER() OVER (ORDER BY salary_amt) AS "Salary Row No",
+	-- Order each partition first, then assign row numbers.
+	ROW_NUMBER() OVER (PARTITION BY dept_name ORDER BY salary_amt) AS "Dept,Salary Row No"
+FROM Payroll
+ORDER BY emp_no;
+```
+
+**ROW_NUMBER**: one distinct number for each row
+
+**RANK**: duplicates number if same rank, skipping the next number(s) in line
+
+**DENSE_RANK**: duplicates number if same rank, no skipping
+
+```sql
+SELECT 	*,
+	-- Row_Number assigns a unique integer to each row within your partition within your window.
+	ROW_NUMBER() OVER (),							-- Note the difference between row_number and the emp_no in terms of when it was captured.
+	ROW_NUMBER() OVER (ORDER BY salary_amt),				-- No Partition, just an ORDER BY, thus the whole base resultset is used.
+	ROW_NUMBER() OVER (PARTITION BY dept_name),
+	ROW_NUMBER() OVER (PARTITION BY dept_name ORDER BY salary_amt),
+
+	-- Ranks --> Equal values are ranked the same, creating gaps in numbering
+	RANK() OVER (),								-- Ranks are useless without an ORDER BY
+	RANK() OVER (PARTITION BY dept_name),
+	RANK() OVER (ORDER BY salary_amt),
+	RANK() OVER (PARTITION BY dept_name ORDER BY salary_amt),
+
+	-- Dense_Ranks --> Equal values are ranked the same, without gaps in numbering
+	DENSE_RANK() OVER (),
+	DENSE_RANK() OVER (PARTITION BY dept_name),
+	DENSE_RANK() OVER (ORDER BY salary_amt),
+	DENSE_RANK() OVER (PARTITION BY dept_name ORDER BY salary_amt)
+FROM  	Payroll
+ORDER BY emp_no
+;
+```
+
+```sql
+-- Top 2 earners by department
+-- ROW_NUMBER only takes 2 excluding other earners with same salary
+-- RANK skip dept_rank = 2 if there are 2 ore more earners in first spot
+WITH 	ctePayroll AS (
+	SELECT 	*,
+		DENSE_RANK() OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS dept_rank
+	FROM 	Payroll
+	)
+-- Window function wrapped in a CTE to apply WHERE dept_rank <= 2
+SELECT 	*
+FROM 	ctePayroll
+WHERE 	dept_rank <= 2
+--ORDER BY dept_rank		--> Note how we can order based on CTE name, cannot do this without CTE
+;
+```
+
+**LAG**: previous row
+
+**LEAD**: next row
+
+FIRST_VALUE (column) OVER (...)
+
+LAST_VALUE (column) OVER (...)
+
+```sql
+SELECT 	emp_no,
+		dept_name,
+		emp_name,
+		LEAD(emp_name) 	OVER (PARTITION BY dept_name ORDER BY emp_no) AS "Next Employee",
+		LAG(emp_name) 	OVER (PARTITION BY dept_name ORDER BY emp_no) AS "Previous Employee",
+	  LAG(emp_name, 2) OVER (PARTITION BY dept_name ORDER BY emp_no) AS "Previous Offset 2",
+	  LAG(emp_name, 2, 'nada...') OVER (PARTITION BY dept_name ORDER BY emp_no) AS "Previous Offset 2 with Defaults"
+FROM 	Payroll
+ORDER BY emp_no;
+```
+
+```sql
+SELECT 	*,
+	FIRST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS "Higest Earner",
+	MAX(salary_amt) 			OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS "Highest Salary",
+
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS "Lowest Earner",  --> Notice how LAST and MIN move with Window Frame
+	MIN(salary_amt) 			OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS "Lowest Salary",
+
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name) AS "Lowest Earner for real",
+	MIN(salary_amt)			OVER (PARTITION BY dept_name) "Lowest Salary for real"
+FROM 	Payroll
+ORDER BY dept_name, salary_amt DESC
+;
+```
+
+**(ROWS / RANGE) BETWEEN (UNBOUNDED PRECEDING / CURRENT ROW / N PRECEDING) AND (CURRENT ROW / UNBOUNDED FOLLOWING / N FOLLOWING)**
+
+ROWS is default for PARTITION BY
+
+RANGE is default for ORDER BY (within the Partition): **if there is no ORDER BY then RANGE considers the entire group**
+
+**if in RANGE mode and with ORDER BY then the CURRENT ROW also contain all the other previous/next rows that share the same value of the ORDER BY column**
+
+
+```sql
+SELECT 	*,
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC) AS "Default lv",
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "lv range up cr",  --> So ORDER BY default is RANGE
+
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "lv rows up cr", --> Overriding default behaviour here
+
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS "lv cr uf",
+
+	LAST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS "lv up uf",
+
+	FIRST_VALUE(emp_name) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS "fv up uf"
+FROM 	Payroll
+;
+```
+
+```sql
+SELECT *,
+	SUM(salary_amt) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "sum range up cr",
+	SUM(salary_amt) 	OVER (PARTITION BY dept_name ORDER BY salary_amt DESC
+							ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS "sum rows up cr"
+FROM Payroll
+;
+```
+
+Checklist:
+
+* Split the set? **PARTITION BY**
+* Order inside the partition? **ORDER BY**
+* Same ORDER BY values? (RANGE vs ROW) and (RANK vs DENSE_RANK)
+* Check window default
+
+| Scope     | Type        | Function                                     | Description                                    |
+| --------- | ----------- | -------------------------------------------- | ---------------------------------------------- |
+| frame     | computation | generic aggs                                 | ex: SUM, AVG                                   |
+| frame     | row access  | FIRST/LAST/NTH _VALUE                        | (first/last/nth) frame value                   |
+| partition | row access  | LAG/LEAD/ROW_NUMBER                          | row (before/after) current, current row number |
+| partition | ranking     | CUME_DIST/DENSE_RANK/NTILE/PERCENT_RANK/RANK | ...                                            |
+
+If no PARTITION BY is defined then the partition is the entire set
+
+
+## Index
+
+https://www.youtube.com/watch?v=HAn1xu6_SW0
+
+https://www.youtube.com/watch?v=Mni_1yTaNbE
+
+https://www.postgresql.org/docs/current/sql-alterindex.html
+
+* B-tree (Balanced Tree, the most used):
+  * Supports <, <=, =, >=, >, IN, BETWEEN, IS NULL, IS NOT NULL.
+  * LIKE and ~ only if regexp is constant with an anchored start (LIKE 'foo%').
+  * ILIKE and ~* (case insensiteve) only if the first letter is not a letter (case sensitivity doesn't matter).
+
+* GIN (Generalized Inverted Index)
+  * good for columns with multiple values (array, jsonb, tsvector, range types)
+  * contains an inde entry for each value and test the presence for specific value
+  * useful for text search (pg_trgm extension), slower to build (and more memory) but faster to use
+  * Supports <@, @>, =, &&, ?, ?&, ?|, @>, @@, @@@
+
+* GiST (Generalized Search Tree)
+  * for rows with overlapping values
+  * best for geometry
+
+* SP-GiST (Spaced Partitioned GiST)
+  * for larger data wih natural clustering (telephone number, IP addresses)
+
+* BRIN (Blocked range index)
+  * for orded data (it fetches the blocks that may potentially contain the searched value)
+
+* Hash
+  * only if you use = operator
+
+
+```sql
+-- Sigle column index
+-- will default to btree
+create index name on myTable (col1);
+create index name on myTable using hash (col1);
+
+-- Multi column index: the db will concatenate the values
+-- still used if the first specified columns (in order) are used:
+-- "select * from myTable where col1 = 'A'"
+-- not used in case if only col2
+-- "select * from myTable where col2 = 'A'"
+create index name on myTable (col1, col2);
+-- Compound for sorting to match the order by
+create index name on myTable (col1 asc, col2 desc);
+
+-- Partial index and index on expression (must be IMMUTABLE)
+-- great if the where clause matches the select query
+create index name on myTable (col1) where col2 > 100;
+create index name on myTable (lower(col1));
+
+-- Only btree
+create unique index name on myTable (col1);
+
+-- Doesn't lock the table. Marks the index as invalid until completion
+create index concurrently name on myTable (col1);
+```
+
+A Unique constraints will create a unique index. The difference is that unique index can have where clause. Use unique index only in case of partial index with where clause (**don't create both**).
+
+```sql
+-- Add constraint concurrently without locking the table
+create index concurrently ix_name on myTable (col1);
+alter table myTable add unique constraint un_name using index ix_name;
+```
+
+Foreign key constraints do not create any index automatically: consider adding an index to improve DELETE and UPDATE performance (avoid sequentially scan of the related table).
+
+Single column index is used when retrieving only that column or when sorting by that column.
+
+```sql
+create index name on myTable (col1);
+-- Scan the index without reading other columns
+select col1 from myTable;
+-- order by only works with btree
+select * from myTable order by col1 asc;
+```
+
+Check the where clause:
+
+```sql
+-- does not use index on sale_date
+select * from sales where now() > sale_date + INTERVAL 30 DAY;
+-- uses index on sale_date because right side is constant
+select * from sales where sale_date < now() - INTERVAL 30 DAY;
+```
+
+```sql
+-- idx_tup_read, idx_tup_fetch: if zero then the index is unused
+select * from pg_stat_user_indexes;
+select * from pg_stat_user_tables;
+```
+
+PostgreSQL decide to execute a specific plan based on cost. Some of the affected parameter can be found in :
+```sql
+-- most_common_vals, histogram_bounds
+select * from pg_stats;
+```
+
+
+## Constraints
+
+https://www.youtube.com/watch?v=s1MYgLFhs-o
+
+* primary key:
+  * limited to one (single or multiple composite columns), cannot be NULL
+  * create table products (id serial primary key, name varchar(20), price numeric(7,2));
+  * create table products (id int, name varchar(20), price numeric(7,2), primary key(id, name));
+
+* NOT NULL:
+  * alter table products alter price set not null;
+
+* check:
+  * alter table products add constraint positive_price check (price > 0);
+
+* unique:
+  * alter table products add constraint unique_name unique (name);
+  * duplicate NULL values are accepted
+
+* foreign key:
+  * add constraint constraint_name foreign key(col_name) references parent_table(col_name);
+
+* exclusion:
+  * ensures that if any two rows are compared on the specified columns/expressions/operators then at least one of the comparisons will return false or null
+  * create table b (p period);
+  * alter table b add exclude using gist (p with &&);
+  * insert into b values ('[2009-01-05, 2009-01-10]');
+  * insert into b values ('[2009-01-07, 2009-01-12]'); -> causes error
+
+* constraint on jsonb field:
+  * create table jsontable (j json not null);
+  * create unique index j_uuid_idx on jsontable(((j->>'uuid')::uuid));
+  * alter table jsontable add constraint uuid_must_exists check(j?'uuid');
+
+* constraint triggers (see https://www.postgresql.org/docs/9.0/sql-createconstraint.html)
+
+
+## PL/pgSQL
+
+https://www.youtube.com/watch?v=7nCCN6OE9iA
+
+https://www.youtube.com/watch?v=VqW_l5JNbpQ
+
+https://www.postgresql.org/docs/current/plpgsql.html
+
+https://www.postgresql.org/docs/current/plpgsql-control-structures.html
+
+https://www.postgresql.org/docs/current/errcodes-appendix.html
+
+https://www.postgresql.org/docs/current/plpgsql-statements.html
+
+Fuction:
+* (usually) have return values (scalar like int, text, varchar or composite like row {fixed structure}, record {not fixed structure} or void return or declared as function parameters)
+* single transaction
+* can be executed with select
+* RETURNS TABLE (column_name column_type, ...) can be used to define the output structure
+* RETURNS SETOF to return multiple rows
+* can be executed with named notation (parameters order can be changed) or mixed but cannot be used with aggregate functions:
+  * select concat_lower_or_upper(a => 'Hello', b => 'World', uppercase => true);
+  * select concat_lower_or_upper(a := 'Hello', b := 'World', uppercase := true);
+* [RETURN NEXT and RETURN QUERY](https://www.postgresql.org/docs/current/plpgsql-control-structures.html#PLPGSQL-STATEMENTS-RETURNING-RETURN-NEXT) (only if declared RETURNS SETOF sometype)
+  * they both append the value to the result
+  * still must call RETURN to exit the function
+  * RETURN NEXT example: FOR r IN (SELECT ...) LOOP RETURN NEXT r; END LOOP; RETURN;
+  * RETURN QUERY example: RETURN QUERY SELECT ...; RETURN;
+* function overloading: you can define multiple function with the same name and different in-out signature (can be ambigous with variadic inputs)
+
+
+```sql
+-- amorphous type return record
+create or replace function testfoo (in int, inout int, out int) returns record as
+$$ values ($2, $1 * $2) $$ language sql;
+
+-- column1 :3     column2:42
+select * from testfoo(14,3);
+
+-- testfoo: (3,42)
+select testfoo(14,3);
+```
+
+```sql
+create or replace function testfoo (in a int, inout mult int = 2, out a int) returns record as
+$$ values (mult, a * mult) $$ language sql;
+
+-- Same result as before
+select * from testfoo(mult:= 3, a:= 14);
+select * from testfoo(mult=> 3, a=> 14);
+
+-- testfoo: (2,28) -> mult has default 2
+select testfoo(a:= 14);
+```
+
+```sql
+-- argtype can reference a table column with: table_name.column_name%TYPE
+-- polymorphic pseudotypes: anyelement, anyarray, anynonarray, anyenum, anyrange
+create or replace function testfoo (inout a anyelement, inout mult anyelement) returns record as
+$$ values (a * mult,mult) $$ language sql;
+
+-- testfoo: (8.5353992,3.14)
+select testfoo(mult:= 3.14, a:= 2.71828);
+```
+
+```sql
+-- no returns clause -> can't return multiple rows
+create or replace function testbar1(out f1 int, out f2 text) as
+$$ values (42, 'hello'), (64, 'world') $$ language sql;
+-- testbar1: (42,hello)
+select testbar1();
+
+-- With returns setof record
+create or replace function testbar2(out f1 int, out f2 text) returns setof record as
+$$ values (42, 'hello'), (64, 'world') $$ language sql;
+-- testbar2: (42,hello), (64,world)
+select testbar2();
+
+-- With custom type
+create type testbar3_type as (f1 int, f2 text);
+create or replace function testbar3() returns setof testbar3_type as
+$$ values (42, 'hello'), (64, 'world') $$ language sql;
+-- testbar3: (42,hello), (64,world)
+select testbar3();
+
+-- With table
+create or replace function testbar4() returns table (f1 int, f2 text) as
+$$ values (42, 'hello'), (64, 'world') $$ language sql;
+-- testbar4: (42,hello), (64,world)
+select testbar4();
+
+-- No specification
+create or replace function testbar5() returns setof record as
+$$ values (42, 'hello'), (64, 'world') $$ language sql;
+-- testbar5: (42,hello), (64,world)
+select testbar5();
+-- you need to specify the columns type and names in a select *
+select * from testbar5() as t(f1 int, f2 text);
+select * from testbar5() t(f1 int, f2 text);
+```
+
+* RETURNS NULL ON NULL INPUT: more efficient since it skips the function call
+
+```sql
+create or replace function sum1 (int, int) returns int as
+$$ select $1 + $2 $$ language sql returns null on null input;
+
+create or replace function sum2 (int, int) returns int as
+$$ select coalesce($1, 0) + coalesce($2, 0) $$ language sql called on null input;
+```
+
+Procedures:
+* no return value (but technically if it has an INOUT parameter it can modify that input variable)
+* **can manage multiple transactions**
+* executed with CALL
+
+**IF/ELSEIF/CASE WHEN statement conditions do not short circuit**
+
+EXECUTE INTO:
+
+```sql
+EXECUTE 'SELECT count(*) FROM mytable WHERE inserted_by = $1 AND inserted <= $2'
+   INTO c
+   USING checked_user, checked_date;
+```
+
+CASE without an ELSE branch will throw a CASE_NOT_FOUND if there is no match
+
+FOR:
+* FOR i IN 1..10 LOOP (...) END LOOP; -> 1,2,3...10
+* FOR i IN REVERSE 10...1 LOOP (...) END LOOP; -> 10,9,8...1
+* FOR i IN REVERSE 10...1 BY 2 LOOP (...) END LOOP; -> 10,8,6,4,2
+* FOR r IN query LOOP (...) END LOOP; -> query must return rows
+* FOR r IN EXECUTE textExpression LOOP (...) END LOOP; -> textExpression is a prepared statement
+* FOREACH x SLICE 1 IN ARRAY $1 LOOP (...) END LOOP; -> SLICE indicates the dimension of the loop in which array is traversed. If not defined then the elements are traversed in storage order
+
+
+EXCEPTION handling block: only use them when needed because they are expensive to enter and exit
+
+```sql
+-- use either the sql state code or the name in the EXCEPTION block
+-- https://www.postgresql.org/docs/current/errcodes-appendix.html
+BEGIN
+  -- statements
+EXCEPTION
+-- SQLSTATE SQLERR
+-- GET STACKED DIAGNOSTICS
+-- https://www.postgresql.org/docs/current/plpgsql-statements.html
+  -- WHEN condition THEN handler_statements
+END
+```
+
+
+## Shadow table
+
+https://www.youtube.com/watch?v=Ew_P1Mk6VlQ
+
+https://lloyd.thealbins.com/ShadowTablesVersPGAudit
+
+By using a trigger it is possible to create an audit table with the entire history of the values, the users who performed any operations on the data.
+
+See [SQL Files](./db/migrations/20240225152915_shadowTable.sql)
+
+On any insert, update, delete, truncate a trigger will execute a function that will write the operation into the shadow table
+
+```sql
+-- Version 1 (TRUNCATE will copy all the rows to the shadow table)
+-- distinct + order by key, action_time will return only the last action for each key
+SELECT * FROM (
+   SELECT DISTINCT ON (key) *
+   FROM table2
+   WHERE action_time <= '01/01/2030'
+   ORDER BY key, action_time DESC
+) a
+WHERE action IN ('UPDATE', 'INSERT');
+```
+
+
+```sql
+-- Version 1 (TRUNCATE will copy all the rows to the shadow table)
+-- Reset the table up to a timestamp
+BEGIN;
+ALTER TABLE table1 DISABLE TRIGGER ALL;
+TRUNCATE table1;
+INSERT INTO table1 SELECT key, value, value_type FROM (
+  -- get the most recent values before the timestamp
+   SELECT DISTINCT ON (key) *
+   FROM table2
+   WHERE action_time <= '12/4/2015 11:46:36 AM'
+   --HAVING action IN ('SELECT', 'INSERT')
+   ORDER BY key, action_time DESC
+) a
+WHERE action IN ('UPDATE', 'INSERT');
+ALTER TABLE table1 ENABLE TRIGGER ALL;
+-- Optional trim of the shadow table for anything after the time
+DELETE FROM table2 WHERE action_time > '12/4/2015 11:46:36 AM';
+END;
+```
+
+In case of massive insert/update/delete with PostgreSQL 10+ use [this version of the trigger](./db/2019-03-22%20Shadow%20Tables%20vers%20pgAudit.sql#L577) (577 - 678) which create a temp table with all the modified rows
+
+
+## UPSERT
+
+https://www.youtube.com/watch?v=wgLf_ucdFbY
+
+**EXCLUDED** references the failed inserted row
+
+```sql
+-- With update
+insert into distributors (did, dname)
+values (1, 'Distributor 1'), (2, 'Distributor 2')
+on conflict (did) do update set dname = EXCLUDED.name;
+
+-- ignore
+insert into distributors (did, dname)
+values (1, 'Distributor 1'), (2, 'Distributor 2')
+on conflict (did) do nothing;
+
+
+insert into distributors (did, dname) as d
+values (1, 'Distributor 1'), (2, 'Distributor 2')
+on conflict (did) do update set dname = EXCLUDED.name;
+where d.zipcode != '1234';
+```
+
+**on conflict (did)** -> **did** is the unique index
+
+**RETURNING** * is also supported, so it can be used inside a **WITH** block.
+
+
+
+
+## Monitoring
+
+https://www.youtube.com/watch?v=JqG0xtaHqCg
+
+https://www.slideshare.net/denishpatel/advanced-postgres-monitoring
+
+```sql
+-- Client connections
+-- check current query and query_start
+select * from pg_stat_activity;
+
+-- Transactions
+select * from pg_stat_database;
+
+-- Queries
+select * from pg_stat_user_tables;
+
+-- Disk IO
+select * from pg_statio_user_tables;
+
+-- Database size
+select pg_size_pretty(pg_database_size('mydb')) as size;
+
+-- Locks
+select * from pg_locks;
+
+-- Archiving
+select * from pg_stat_archiver;
+
+-- Scans
+select * from pg_stat_all_tables;
 ```

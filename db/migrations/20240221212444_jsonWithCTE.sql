@@ -20,7 +20,7 @@ insert into dndclasses values
 (12,3,'Priest of specific mythos'),
 (13,4,'Thief'),
 (14,4,'Bard'),
-(15,1,'Assassin');
+(15,13,'Assassin');
 
 
 -- migrate:down
