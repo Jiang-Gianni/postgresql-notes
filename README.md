@@ -18,6 +18,17 @@
   - [Shadow table](#shadow-table)
   - [UPSERT](#upsert)
   - [Monitoring](#monitoring)
+  - [pgexercises](#pgexercises)
+  - [pg\_stat\_statements](#pg_stat_statements)
+  - [Postgres basic types](#postgres-basic-types)
+  - [Lateral Join](#lateral-join)
+  - [Generated Columns](#generated-columns)
+  - [Trigger](#trigger)
+  - [Transaction](#transaction)
+  - [CTE](#cte)
+  - [Performance](#performance)
+    - [OR clause](#or-clause)
+    - [COUNT(\*)](#count)
 
 # postgresql-notes
 Notes about PostgreSQL and Go
@@ -36,6 +47,7 @@ Connection string:
 **postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable**
 
 ```bash
+# https://www.postgresql.org/docs/current/app-psql.html
 psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable
 ```
 
@@ -90,6 +102,8 @@ Other tools with explain:
 ## Listen JSON
 
 Using PostgreSQL's LISTEN/NOTIFY feature with Go:
+
+https://tapoueh.org/blog/2018/07/postgresql-listen/notify/
 
 https://coussej.github.io/2015/09/15/Listening-to-generic-JSON-notifications-from-PostgreSQL-in-Go/
 
@@ -615,7 +629,7 @@ ORDER BY dept_name, salary_amt DESC
 ;
 ```
 
-**(ROWS / RANGE) BETWEEN (UNBOUNDED PRECEDING / CURRENT ROW / N PRECEDING) AND (CURRENT ROW / UNBOUNDED FOLLOWING / N FOLLOWING)**
+**(ROWS / RANGE) BETWEEN (UNBOUNDED PRECEDING / CURRENT ROW / N PRECEDING) AND (CURRENT ROW / UNBOUNDED FOLLOWING / N FOLLOWING) EXCLUDE (CURRENT ROW / GROUP / TIES NO OTHERS)**
 
 ROWS is default for PARTITION BY
 
@@ -732,6 +746,15 @@ create unique index name on myTable (col1);
 create index concurrently name on myTable (col1);
 ```
 
+After altering a table and adding an expression based index, launch:
+
+```sql
+analyze yourTableName;
+```
+
+so that Postgres collects statistics about the contents of the table to make a better evaluations (with the new index) of the query plans.
+
+
 A Unique constraints will create a unique index. The difference is that unique index can have where clause. Use unique index only in case of partial index with where clause (**don't create both**).
 
 ```sql
@@ -743,6 +766,8 @@ alter table myTable add unique constraint un_name using index ix_name;
 Foreign key constraints do not create any index automatically: consider adding an index to improve DELETE and UPDATE performance (avoid sequentially scan of the related table).
 
 Single column index is used when retrieving only that column or when sorting by that column.
+
+Careful when adding an index for sorting (see https://www.cybertec-postgresql.com/en/index-decreases-select-performance/)
 
 ```sql
 create index name on myTable (col1);
@@ -773,12 +798,17 @@ PostgreSQL decide to execute a specific plan based on cost. Some of the affected
 select * from pg_stats;
 ```
 
+For materialized views it can be beneficial to break a long view select into chunks of smaller views and add an index to each of them in order to speed up all the joins.
+
+https://gajus.medium.com/lessons-learned-scaling-postgresql-database-to-1-2bn-records-month-edc5449b3067
+
 
 ## Constraints
 
 https://www.youtube.com/watch?v=s1MYgLFhs-o
 
 * primary key:
+  * **it generates a unique index**
   * limited to one (single or multiple composite columns), cannot be NULL
   * create table products (id serial primary key, name varchar(20), price numeric(7,2));
   * create table products (id int, name varchar(20), price numeric(7,2), primary key(id, name));
@@ -790,6 +820,7 @@ https://www.youtube.com/watch?v=s1MYgLFhs-o
   * alter table products add constraint positive_price check (price > 0);
 
 * unique:
+  * **it generates a unique index**
   * alter table products add constraint unique_name unique (name);
   * duplicate NULL values are accepted
 
@@ -797,6 +828,7 @@ https://www.youtube.com/watch?v=s1MYgLFhs-o
   * add constraint constraint_name foreign key(col_name) references parent_table(col_name);
 
 * exclusion:
+  * **it generates an index**
   * ensures that if any two rows are compared on the specified columns/expressions/operators then at least one of the comparisons will return false or null
   * create table b (p period);
   * alter table b add exclude using gist (p with &&);
@@ -922,6 +954,11 @@ create or replace function sum2 (int, int) returns int as
 $$ select coalesce($1, 0) + coalesce($2, 0) $$ language sql called on null input;
 ```
 
+* To alter Postgres Query Planning:
+```sql
+alter function your_function(int) cost 9001;
+```
+
 Procedures:
 * no return value (but technically if it has an INOUT parameter it can modify that input variable)
 * **can manage multiple transactions**
@@ -1010,7 +1047,7 @@ DELETE FROM table2 WHERE action_time > '12/4/2015 11:46:36 AM';
 END;
 ```
 
-In case of massive insert/update/delete with PostgreSQL 10+ use [this version of the trigger](./db/2019-03-22%20Shadow%20Tables%20vers%20pgAudit.sql#L577) (577 - 678) which create a temp table with all the modified rows
+In case of massive insert/update/delete with PostgreSQL 10+ use [this version of the trigger](./db/2019-03-22%20Shadow%20Tables%20vers%20pgAudit.sql#L577) (577 - 678) which create a temporary table with all the modified rows
 
 
 ## UPSERT
@@ -1058,7 +1095,7 @@ select * from pg_stat_activity;
 -- Transactions
 select * from pg_stat_database;
 
--- Queries
+-- Tables
 select * from pg_stat_user_tables;
 
 -- Disk IO
@@ -1075,4 +1112,132 @@ select * from pg_stat_archiver;
 
 -- Scans
 select * from pg_stat_all_tables;
+
+-- Settings
+select * from pg_settings;
 ```
+
+## pgexercises
+
+https://pgexercises.com/gettingstarted.html
+
+
+
+## pg_stat_statements
+
+Enabling with Docker:
+
+https://gist.github.com/lfittl/1b0671ac07b33521ea35fcd22b0120f5
+
+```sql
+CREATE EXTENSION pg_stat_statements;
+
+SELECT *
+FROM pg_available_extensions
+WHERE
+name = 'pg_stat_statements' and
+installed_version is not null;
+```
+
+```sql
+select * from pg_stat_statements;
+```
+
+```sql
+select pg_stat_statements_reset();
+```
+
+## Postgres basic types
+
+```sql
+select nspname, typname
+from pg_type t join pg_namespace n on n.oid = t.typnamespace
+where nspname = 'pg_catalog' and typname !~ '(^_|^pg_|^reg|_handler$)'
+order by nspname, typname;
+```
+
+
+## Lateral Join
+
+https://www.crunchydata.com/developers/playground/lateral-join
+
+https://stackoverflow.com/a/52671180
+
+```sql
+SELECT * FROM (
+    SELECT id, name, created_at FROM companies WHERE created_at < '2018-01-01'
+) c, LATERAL delete_company(c.id);
+```
+
+## Generated Columns
+
+https://www.postgresql.org/docs/current/ddl-generated-columns.html#:~:text=A%20virtual%20generated%20column%20occupies,implements%20only%20stored%20generated%20columns.
+
+```sql
+CREATE TABLE people (
+    ...,
+    height_cm numeric,
+    height_in numeric GENERATED ALWAYS AS (height_cm / 2.54) STORED
+);
+```
+
+
+## Trigger
+
+https://www.postgresql.org/docs/current/plpgsql-trigger.html#PLPGSQL-DML-TRIGGER
+
+https://www.youtube.com/watch?v=gV5W4AhWBzo
+
+https://tapoueh.org/blog/2018/07/postgresql-event-based-processing/
+
+https://severalnines.com/blog/postgresql-triggers-and-stored-function-basics
+
+Trigger execution order:
+timing AFTER / BEFORE
+ordered alphabetically by trigger_name (later trigger will received the updated data from the previous triggers)
+
+```sql
+select * from information_schema.triggers
+order by action_timing desc, trigger_name
+;
+```
+
+
+## Transaction
+
+```sql
+begin;
+select txid_current();
+rollback;
+```
+
+## CTE
+
+https://hakibenita.medium.com/be-careful-with-cte-in-postgresql-fca5e24d2119
+
+https://www.crunchydata.com/blog/with-queries-present-future-common-table-expressions
+
+CTEs are materialized so the planner can't fully optimize them
+
+
+## Performance
+
+### OR clause
+
+https://www.cybertec-postgresql.com/en/avoid-or-for-better-performance/
+
+https://www.cybertec-postgresql.com/en/rewrite-or-to-union-in-postgresql-queries/
+
+OR in WHERE clause often requires a Bitmap index scan, consuming more RAM. A multi index doesn't help.
+
+* (single table) `... WHERE id = value_1 OR id = value_2` (Bitmap Heap scan) is better rewritten as `... WHERE id IN (value_1, value_2)` (Index Only Scan)
+* (join tables) `... FROM a JOIN b ... WHERE a.id = value_1 OR b.id = value_2` (Merge Join) is better rewritten as ` ... FROM a JOIN b ...WHERE a.id = value_1 UNION ALL ...  FROM a JOIN b  ...WHERE b.id = value_2` (Unique) (careful about duplicates)
+
+
+### COUNT(*)
+
+https://www.youtube.com/watch?v=GtQueJe6xRQ
+
+https://www.postgresql.org/docs/current/sql-vacuum.html
+
+COUNT(*) can be slow because every transaction can see a different set of rows. Each row have a transacion min and max: Postgres determines the visibility based on this range. Use `VACUUM` to clear dead rows that are not visible anymore.

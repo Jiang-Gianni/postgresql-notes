@@ -12,3 +12,6 @@ up:
 
 down:
 	dbmate down && docker exec local-postgres pg_dump --inserts mydb > ./db/schema.sql
+
+dc:
+	docker compose up --detach
