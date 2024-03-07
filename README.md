@@ -15,6 +15,14 @@
   - [Index](#index)
   - [Constraints](#constraints)
   - [PL/pgSQL](#plpgsql)
+    - [Fuction:](#fuction)
+    - [Procedures:](#procedures)
+    - [Records](#records)
+    - [Cursors](#cursors)
+    - [Table](#table)
+    - [FOR](#for)
+    - [ARRAY](#array)
+  - [JSON](#json)
   - [Shadow table](#shadow-table)
   - [UPSERT](#upsert)
   - [Monitoring](#monitoring)
@@ -26,9 +34,13 @@
   - [Trigger](#trigger)
   - [Transaction](#transaction)
   - [CTE](#cte)
+  - [Custom Operator](#custom-operator)
+  - [Custom Cast](#custom-cast)
+  - [Temporary Functions](#temporary-functions)
   - [Performance](#performance)
     - [OR clause](#or-clause)
     - [COUNT(\*)](#count)
+  - [Other](#other)
 
 # postgresql-notes
 Notes about PostgreSQL and Go
@@ -484,6 +496,10 @@ deallocate stmt;
 
 * **index**: check the explain analysis that the query uses the (partial) index. Drop any unused index.
 
+```sql
+UPDATE pg_index SET indisvalid = false WHERE indexrelid::regclass::text IN ( < Unused indexes > )
+```
+
 
 ## Window Functions
 
@@ -857,20 +873,83 @@ https://www.postgresql.org/docs/current/errcodes-appendix.html
 
 https://www.postgresql.org/docs/current/plpgsql-statements.html
 
-Fuction:
+### Fuction:
 * (usually) have return values (scalar like int, text, varchar or composite like row {fixed structure}, record {not fixed structure} or void return or declared as function parameters)
 * single transaction
 * can be executed with select
 * RETURNS TABLE (column_name column_type, ...) can be used to define the output structure
-* RETURNS SETOF to return multiple rows
+
+```sql
+create or replace function <function_name>
+returns table (col1 type, col2...) as $$
+begin
+ return query <your select query>;
+end;
+$$ language plpgsql;
+```
+
+* RETURNS SETOF to return multiple rows. Each of which can have different columns.
+
+```sql
+create or replace function <function_name>
+returns setof <table> as $$
+begin
+ return query <your select query>;
+end;
+$$ language plpgsql;
+```
+
+* OUT (and INOUT for input+output) can be used to define the output. Use SELECT INTO to set the value. Cannot return multiple rows.
+
+```sql
+create or replace function <function_name>(out <parameter> integer)
+as $$
+begin
+ select <col> into <parameter> from <table>;
+end;
+$$ language plpgsql;
+```
+```sql
+-- A list of out parameters can also be defined
+create or replace function public.testout(out p_output1 integer, out p_output2 text)
+returns setof record language plpgsql as $function$
+declare
+ v_rec record;
+begin
+ for v_rec in (select generate_series(1, 10) i, 'abcd' a ) loop
+    p_output1 := v_rec.i;
+    p_output2 := v_rec.a;
+    return next;
+ end loop;
+ return;
+end;
+$function$;
+```
+
 * can be executed with named notation (parameters order can be changed) or mixed but cannot be used with aggregate functions:
   * select concat_lower_or_upper(a => 'Hello', b => 'World', uppercase => true);
   * select concat_lower_or_upper(a := 'Hello', b := 'World', uppercase := true);
 * [RETURN NEXT and RETURN QUERY](https://www.postgresql.org/docs/current/plpgsql-control-structures.html#PLPGSQL-STATEMENTS-RETURNING-RETURN-NEXT) (only if declared RETURNS SETOF sometype)
   * they both append the value to the result
   * still must call RETURN to exit the function
-  * RETURN NEXT example: FOR r IN (SELECT ...) LOOP RETURN NEXT r; END LOOP; RETURN;
+  * RETURN NEXT is used to build up the return value by adding the next row of a set. This way a single row is returned at a time instead of the entire set at once. Example: FOR r IN (SELECT ...) LOOP RETURN NEXT r; END LOOP; RETURN;
   * RETURN QUERY example: RETURN QUERY SELECT ...; RETURN;
+
+```sql
+-- Can also return the results of multiple queries
+-- Output: 1,2,3,4,5,2
+create or replace function public.test_multiple()
+returns setof integer
+language plpgsql
+as $function$
+begin
+ return query select generate_series(1,5);
+ return query select 2;
+ return;
+end;
+$function$;
+```
+
 * function overloading: you can define multiple function with the same name and different in-out signature (can be ambigous with variadic inputs)
 
 
@@ -959,10 +1038,103 @@ $$ select coalesce($1, 0) + coalesce($2, 0) $$ language sql called on null input
 alter function your_function(int) cost 9001;
 ```
 
-Procedures:
+### Procedures:
 * no return value (but technically if it has an INOUT parameter it can modify that input variable)
 * **can manage multiple transactions**
 * executed with CALL
+
+
+### Records
+
+```sql
+-- ///
+declare
+  my_record my_table%ROWTYPE;
+begin
+  select * into my_record from myT_table where id = 1;
+  my_record.my_column := 'my_value';
+  update my_table set my_column = my_record.my_column where id = 2;
+end;
+```
+
+
+### Cursors
+
+https://www.postgresql.org/docs/current/plpgsql-cursors.html
+
+Great for fetching only a small set of rows at each time, process them and fetch the next set.
+
+```sql
+-- ///
+declare
+  my_cursor refcursor;
+  my_record my_table%ROWTYPE;
+  my_scroll_cursor scroll cursor;
+begin
+  open my_cursor for select * from my_table;
+  -- my_record -> first row
+  fetch my_cursor into my_record;
+  -- my_record -> second row (= next row)
+  fetch my_cursor into my_record;
+  if found then
+    raise notice 'row found.';
+  else
+    raise notice 'no rows found.';
+  end if;
+  -- move forward all to hold all the row
+  move forward all from my_cursor;
+  get diagnostics num_rows = row_count;
+  close my_cursor;
+end;
+```
+
+Cursor attributes:
+
+* ISOPEN
+* FOUND: true if the last operation on the cursor found a row
+* NOTFOUND
+* ROWCOUNT: processed row count by the last FETCH or MOVE statement
+
+Cursors are automatically closed after the transaction end or an exception is raised.
+
+```sql
+-- open cursors
+select * from pg_cursors;
+```
+
+FOR LOOP creates an implicit cursor
+
+SCROLL CURSOR allows to both MOVE BACKWARD and FETCH NEXT and should only be used only to read. NO SCRULL CURSOR to block the backward move
+
+WITH HOLD cursors will persist the data and the pointer even after the transaction end. Great for dashboard/table data.
+
+```sql
+DECLARE cur CURSOR WITH HOLD FOR select * from scroll_test;
+fetch forward 10 from cur;
+fetch forward 10 from cur;
+fetch backward 10 from cur;
+```
+
+REFCURSOR can be passed around the function calls
+
+
+
+### Table
+
+```sql
+CREATE OR REPLACE FUNCTION get_top_selling_products(p_month INTEGER)
+RETURNS TABLE (product_id INTEGER, total_sales NUMERIC) AS $$
+DECLARE
+ product_ids INTEGER[] := (SELECT ARRAY_AGG(DISTINCT sales.product_id)
+FROM sales WHERE EXTRACT(MONTH FROM sale_date) = p_month);
+BEGIN
+ RETURN QUERY SELECT s.product_id, SUM(s.price * s.quantity) AS total_
+sales FROM sales s WHERE s.product_id = ANY(product_ids) GROUP BY
+s.product_id ORDER BY total_sales DESC LIMIT 10;
+END;
+$$ LANGUAGE plpgsql;
+```
+
 
 **IF/ELSEIF/CASE WHEN statement conditions do not short circuit**
 
@@ -976,13 +1148,13 @@ EXECUTE 'SELECT count(*) FROM mytable WHERE inserted_by = $1 AND inserted <= $2'
 
 CASE without an ELSE branch will throw a CASE_NOT_FOUND if there is no match
 
-FOR:
+### FOR
 * FOR i IN 1..10 LOOP (...) END LOOP; -> 1,2,3...10
 * FOR i IN REVERSE 10...1 LOOP (...) END LOOP; -> 10,9,8...1
 * FOR i IN REVERSE 10...1 BY 2 LOOP (...) END LOOP; -> 10,8,6,4,2
 * FOR r IN query LOOP (...) END LOOP; -> query must return rows
 * FOR r IN EXECUTE textExpression LOOP (...) END LOOP; -> textExpression is a prepared statement
-* FOREACH x SLICE 1 IN ARRAY $1 LOOP (...) END LOOP; -> SLICE indicates the dimension of the loop in which array is traversed. If not defined then the elements are traversed in storage order
+* FOREACH x SLICE 1 IN ARRAY $1 LOOP (...) END LOOP; -> SLICE indicates the dimension of the loop in which array is traversed. If not defined then the elements are traversed in storage order. **IMPORTANT**: if the ARRAY of the FOREACH statement is NULL then an exception will be thrown
 
 
 EXCEPTION handling block: only use them when needed because they are expensive to enter and exit
@@ -999,6 +1171,54 @@ EXCEPTION
   -- WHEN condition THEN handler_statements
 END
 ```
+
+
+### ARRAY
+
+First element is index 1 but it is possible to explicity assign a value to the index 0 and to negative indices.
+
+Useful functions:
+* array_length(your_array, n): length of your_array at depth n (n=1 for the length of the entire array). The array is calculated based on the upper and lower bound of the array which means that if a value is explicitly assigned at an index greater than the size of the original array then the upper bound will grow (and so will the length): the gaps are filled with NULLs
+* unnest(ARRAY['ONE', 'TWO', 'THREE'])
+```sql
+SELECT * FROM unnest(ARRAY['ONE', 'TWO', 'THREE']) AS arr_element;
+```
+* ||: used to append values. Example: v_dup:= v_dup||v_arr[idx];
+* v_arr:= array_append(v_arr, 'FOUR'); // works like ||
+* array_cat(v_arr1, v_arr2); // merge two arrays
+
+
+
+## JSON
+
+https://www.postgresql.org/docs/9.4/functions-json.html
+
+```sql
+CREATE TABLE test_table (
+ id SERIAL PRIMARY KEY,
+ data JSON
+);
+INSERT INTO test_table (data) VALUES ('{"name": "my_name", "age": 30}');
+
+-- "my_name"	30
+SELECT data->'name' as name, data->'age' as age FROM test_table
+--  -> access the value and return a json type
+SELECT pg_typeof(data->'name') as name, pg_typeof(data->'age') as age FROM test_table;
+-- ->> to get the field in text format
+SELECT (data->>'name')::varchar as name, (data->>'age')::int as age FROM test_table;
+
+INSERT INTO test_table(data) VALUES ('{"name":["foo","bar"], "age":[40,50]}');
+-- #> to get a specific value
+-- "foo" 40
+SELECT data#>'{name,0}' as name, data#>'{age,1}' as age FROM test_table WHERE id=2;
+SELECT data#>>'{name,0}' as name, data#>>'{age,1}' as age FROM test_table WHERE id=2;
+
+SELECT data FROM test_table WHERE data->'name' ? 'foo';
+
+SELECT jsonb_pretty(data::jsonb) FROM test_table
+```
+
+Use index GIN (Generalized Inverted Index) for simple lookups. Use Index GIST (Generalized Search Tree) to index the entire JSON (complex query for specific values).
 
 
 ## Shadow table
@@ -1086,6 +1306,8 @@ where d.zipcode != '1234';
 https://www.youtube.com/watch?v=JqG0xtaHqCg
 
 https://www.slideshare.net/denishpatel/advanced-postgres-monitoring
+
+https://www.citusdata.com/blog/2019/03/29/health-checks-for-your-postgres-database/
 
 ```sql
 -- Client connections
@@ -1220,6 +1442,70 @@ https://www.crunchydata.com/blog/with-queries-present-future-common-table-expres
 CTEs are materialized so the planner can't fully optimize them
 
 
+
+## Custom Operator
+
+```sql
+create or replace function add_string(varchar, varchar)
+returns varchar as $$
+begin
+    return $1 || $2;
+end;
+$$ language plpgsql immutable;
+grant execute on function add_string(varchar, varchar) to public;
+
+create operator + (
+    leftarg = varchar,
+    rightarg = varchar,
+    procedure = add_string
+);
+-- drop operator +(varchar, varchar);
+-- drop function add_string;
+```
+
+```sql
+-- ?column?: hello world
+select 'hello ' + 'world';
+```
+
+
+## Custom Cast
+
+```sql
+create type fahrenheit as (value numeric(10,2));
+
+create or replace function celsius_to_fahrenheit(celsius numeric)
+returns fahrenheit as $$
+begin
+    return row(Celsius * 9/5 + 32)::fahrenheit;
+end;
+$$ language plpgsql;
+
+create cast(numeric as fahrenheit) with function celsius_to_fahrenheit(numeric ) as implicit;
+```
+
+```sql
+select cast(t::numeric as fahrenheit) from generate_series(1,10) as seq(t);
+select t::numeric::fahrenheit from generate_series(1,10) as seq(t);
+select (t::numeric::fahrenheit).value from generate_series(1,10) as seq(t);
+```
+
+## Temporary Functions
+
+Temporary functions should be defined in the `pg_temp` schema.
+
+```sql
+create  function pg_temp.add_string(varchar, varchar)
+returns varchar as $$
+begin
+    return $1 || $2;
+end;
+$$ language plpgsql immutable;
+```
+
+
+
+
 ## Performance
 
 ### OR clause
@@ -1230,8 +1516,8 @@ https://www.cybertec-postgresql.com/en/rewrite-or-to-union-in-postgresql-queries
 
 OR in WHERE clause often requires a Bitmap index scan, consuming more RAM. A multi index doesn't help.
 
-* (single table) `... WHERE id = value_1 OR id = value_2` (Bitmap Heap scan) is better rewritten as `... WHERE id IN (value_1, value_2)` (Index Only Scan)
-* (join tables) `... FROM a JOIN b ... WHERE a.id = value_1 OR b.id = value_2` (Merge Join) is better rewritten as ` ... FROM a JOIN b ...WHERE a.id = value_1 UNION ALL ...  FROM a JOIN b  ...WHERE b.id = value_2` (Unique) (careful about duplicates)
+* (single table) `... WHERE id = value_1 OR id = value_2` (Bitmap Heap scan) might be better rewritten as `... WHERE id IN (value_1, value_2)` (Index Only Scan)
+* (join tables) `... FROM a JOIN b ... WHERE a.id = value_1 OR b.id = value_2` (Merge Join) might be better rewritten as ` ... FROM a JOIN b ...WHERE a.id = value_1 UNION ALL ...  FROM a JOIN b  ...WHERE b.id = value_2` (Unique) (careful about duplicates)
 
 
 ### COUNT(*)
@@ -1241,3 +1527,25 @@ https://www.youtube.com/watch?v=GtQueJe6xRQ
 https://www.postgresql.org/docs/current/sql-vacuum.html
 
 COUNT(*) can be slow because every transaction can see a different set of rows. Each row have a transacion min and max: Postgres determines the visibility based on this range. Use `VACUUM` to clear dead rows that are not visible anymore.
+
+https://www.peterbe.com/plog/best-way-to-count-distinct-indexed-things-in-postgresql
+
+```sql
+SELECT COUNT(*) FROM (SELECT DISTINCT my_not_unique_indexed_column FROM my_table) t;
+```
+
+https://www.cybertec-postgresql.com/en/postgresql-count-made-fast/
+
+Count estimation (between -10% and +10%):
+
+```sql
+SELECT reltuples::bigint
+FROM pg_catalog.pg_class
+WHERE relname = 'mytable';
+```
+
+
+
+## Other
+
+https://wiki.postgresql.org/wiki/Don't_Do_This

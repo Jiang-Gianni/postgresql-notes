@@ -4652,15 +4652,15 @@ INSERT INTO public.table1 VALUES (5, 30, 'meters');
 -- Data for Name: table2; Type: TABLE DATA; Schema: public; Owner: root
 --
 
-INSERT INTO public.table2 VALUES (1, 30, 'meters', 'root', 'INSERT', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (2, 10, 'inches', 'root', 'INSERT', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'UPDATE', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'DELETE', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (3, 50, 'inches', 'root', 'INSERT', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (1, NULL, NULL, 'root', 'TRUNCATE', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'INSERT', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'DELETE', '2024-03-03 15:44:42.844407');
-INSERT INTO public.table2 VALUES (5, 30, 'meters', 'root', 'INSERT', '2024-03-03 15:44:42.844407');
+INSERT INTO public.table2 VALUES (1, 30, 'meters', 'root', 'INSERT', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (2, 10, 'inches', 'root', 'INSERT', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'UPDATE', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'DELETE', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (3, 50, 'inches', 'root', 'INSERT', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (1, NULL, NULL, 'root', 'TRUNCATE', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'INSERT', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'DELETE', '2024-03-06 21:07:15.439832');
+INSERT INTO public.table2 VALUES (5, 30, 'meters', 'root', 'INSERT', '2024-03-06 21:07:15.439832');
 
 
 --
