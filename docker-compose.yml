@@ -13,3 +13,6 @@ services:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: my-secret-pw
       POSTGRES_DB: mydb
+    build:
+      context: ./
+      dockerfile: Dockerfile

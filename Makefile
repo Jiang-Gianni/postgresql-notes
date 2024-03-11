@@ -15,3 +15,9 @@ down:
 
 dc:
 	docker compose up --detach
+
+logs:
+	docker logs $$(docker ps -a -q --filter ancestor=postgres)
+
+fc:
+	d2 img/optimizationFlowchart.d2 img/optimizationFlowchart.svg

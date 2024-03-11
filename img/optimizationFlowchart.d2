@@ -1,0 +1,40 @@
+direction: right
+
+begin{
+    shape: oval
+}
+
+begin -> short?
+
+short?{
+    shape: diamond
+}
+
+
+incremental?{
+    shape: diamond
+}
+
+short? -> short : yes
+short? -> incremental? : no
+incremental? -> short : yes
+incremental? -> long : no
+
+short{
+    find most restrictive filter
+    check the indeces
+    add excessive selection criteria
+    build the rest of the query
+}
+
+long{
+    find most restrictive join
+    make sure it is applied first
+    make sure full scan is performed only once
+    find the best way to group
+}
+
+short -> end
+long -> end
+
+end.shape: oval

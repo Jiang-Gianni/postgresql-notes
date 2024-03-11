@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -15,11 +14,7 @@ import (
 
 func main() {
 	var conninfo string = db.DATABASE_URL
-
-	_, err := sql.Open("postgres", conninfo)
-	if err != nil {
-		panic(err)
-	}
+	var err error
 
 	done := make(chan struct{})
 	closeOnce := sync.OnceFunc(func() { close(done) })

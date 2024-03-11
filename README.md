@@ -15,13 +15,14 @@
   - [Index](#index)
   - [Constraints](#constraints)
   - [PL/pgSQL](#plpgsql)
-    - [Fuction:](#fuction)
+    - [Function:](#function)
     - [Procedures:](#procedures)
     - [Records](#records)
     - [Cursors](#cursors)
     - [Table](#table)
     - [FOR](#for)
     - [ARRAY](#array)
+    - [EXCEPTION](#exception)
   - [JSON](#json)
   - [Shadow table](#shadow-table)
   - [UPSERT](#upsert)
@@ -36,10 +37,19 @@
   - [CTE](#cte)
   - [Custom Operator](#custom-operator)
   - [Custom Cast](#custom-cast)
+  - [Custom Aggregate](#custom-aggregate)
   - [Temporary Functions](#temporary-functions)
+  - [Dynamic SQL](#dynamic-sql)
   - [Performance](#performance)
     - [OR clause](#or-clause)
     - [COUNT(\*)](#count)
+    - [JOINS](#joins)
+    - [GROUP BY](#group-by)
+    - [SET OPERATIONS](#set-operations)
+    - [FILTER](#filter)
+    - [PARTITIONING](#partitioning)
+    - [Flowchart](#flowchart)
+  - [Extensions:](#extensions)
   - [Other](#other)
 
 # postgresql-notes
@@ -139,6 +149,9 @@ Pro: doesn't require too much configuration if you are already using PostgreSQL.
 
 Cons: only pub-sub (no queue) and might be harder to debug.
 
+
+Postgres queue has a default size of 8GB and is where all NOTIFY command messages are stored, along with the PID of the sender.
+Use `pg_listening_channels()` to get a list of listeners, `pg_notification_queue_usage()` to get a percentage of unprocessed messages
 
 ## Json with CTE
 
@@ -378,8 +391,11 @@ https://tapoueh.org/blog/2018/04/postgresql-data-types-date-timestamp-and-time-z
 Use timestamps WITH time zones (column type **timestamptz**): there no additional memory cost since PostgreSQL defaults to using bigint internally to store timestamps.
 
 ```sql
-select pg_column_size(timestamp without time zone 'now'),
-       pg_column_size(timestamp with time zone 'now');
+select pg_column_size(timestamp without time zone 'now'), pg_column_size(timestamp with time zone 'now');
+
+select (now() at time zone 'asia/shanghai');
+
+select name, abbrev, utc_offset, is_dst from pg_timezone_names;
 ```
 
 ## Advanced Postgres Schema Design
@@ -446,11 +462,11 @@ insert into foo values  ('{{foo, bar}, {bar, bam}}'::text[]);
 -- Error: pq: new row for relation "foo" violates check constraint "ordered"
 insert into foo values  ('{foo, bar}'::text[]);
 ```
-* partial index and include index
+* partial index and include index (also called covering index)
 ```sql
 -- Useful when selecting active rows
 create index foo_idx_active on foo(bar_id) where active;
--- Useful when selecting a, b and c where the condition is checked on a
+-- Useful when selecting only a, b and c where the condition is checked on a
 create index foo_idx_include on foo(a) include (b, c);
 
 create unique index foo_idx_lower on foo(lower(name)) where active;
@@ -461,6 +477,26 @@ create unique index foo_idx_lower on foo(lower(name)) where active;
 pg_class, pg_attribute, pg_constraint, pg_depend, pg_rewrite, pg_index, pg_trigger
 
 [Information Schema](https://www.postgresql.org/docs/current/information-schema.html)
+
+
+```sql
+-- All the views that depend on the column columnName of the table tableName
+SELECT v.oid::regclass AS view
+FROM pg_attribute AS a   -- columns for the table
+   JOIN pg_depend AS d   -- objects that depend on the column
+      ON d.refobjsubid = a.attnum AND d.refobjid = a.attrelid
+   JOIN pg_rewrite AS r  -- rules depending on the column
+      ON r.oid = d.objid
+   JOIN pg_class AS v    -- views for the rules
+      ON v.oid = r.ev_class
+WHERE v.relkind = 'v'    -- only interested in views
+  -- dependency must be a rule depending on a relation
+  AND d.classid = 'pg_rewrite'::regclass
+  AND d.refclassid = 'pg_class'::regclass
+  AND d.deptype = 'n'    -- normal dependency
+  AND a.attrelid = 'tableName'::regclass
+  AND a.attname = 'columnName';
+```
 
 
 ## Identifying Slow Queries and Fixing Them
@@ -749,6 +785,11 @@ create index name on myTable using hash (col1);
 create index name on myTable (col1, col2);
 -- Compound for sorting to match the order by
 create index name on myTable (col1 asc, col2 desc);
+-- In general, an index on (X,Y,Z) will be used for searches on X, (X,Y), and (X,Y,Z) and even (X,Z) but not on Y alone and not on YZ
+-- Index only scan (no table access) if only columns X, Y, Z are retrieved from the select statement. The first column X is mandatory
+-- Index order matters, declare column used for equality first, then the others used for ranges to prevent multiple index scans
+-- Compound indexes can be used to also be able to index NULL like any value by adding the constant as the second index column
+create index name on myTable (nullableColumn, 1);
 
 -- Partial index and index on expression (must be IMMUTABLE)
 -- great if the where clause matches the select query
@@ -760,7 +801,12 @@ create unique index name on myTable (col1);
 
 -- Doesn't lock the table. Marks the index as invalid until completion
 create index concurrently name on myTable (col1);
+
+-- To add an index that helps with 'like' conditions
+create index frequent_fl_last_name_lower_pattern on frequent_flyer (lower(last_name) text_pattern_ops);
 ```
+
+Index can also be applied to [Generated Columns](#generated-columns)
 
 After altering a table and adding an expression based index, launch:
 
@@ -819,6 +865,25 @@ For materialized views it can be beneficial to break a long view select into chu
 https://gajus.medium.com/lessons-learned-scaling-postgresql-database-to-1-2bn-records-month-edc5449b3067
 
 
+
+Cluster:
+
+```sql
+CLUSTER table_name USING index_name;
+ANALYZE table_name;
+```
+
+
+If there is an index on a timestamp column and there is a need to extract values for a single date then it can be more performant to use a range comparison instead of casting the timestamp to a date:
+
+```sql
+-- may not use the index
+where my_tmstmp::date = '2024-03-10'
+-- will use the index
+where my_tmstmp >= '2024-03-10' and my_tmstmp < '2024-03-11'
+```
+
+
 ## Constraints
 
 https://www.youtube.com/watch?v=s1MYgLFhs-o
@@ -873,7 +938,7 @@ https://www.postgresql.org/docs/current/errcodes-appendix.html
 
 https://www.postgresql.org/docs/current/plpgsql-statements.html
 
-### Fuction:
+### Function:
 * (usually) have return values (scalar like int, text, varchar or composite like row {fixed structure}, record {not fixed structure} or void return or declared as function parameters)
 * single transaction
 * can be executed with select
@@ -1038,6 +1103,8 @@ $$ select coalesce($1, 0) + coalesce($2, 0) $$ language sql called on null input
 alter function your_function(int) cost 9001;
 ```
 
+* Functions can worsen performance because they can't be optimized by the query planner
+
 ### Procedures:
 * no return value (but technically if it has an INOUT parameter it can modify that input variable)
 * **can manage multiple transactions**
@@ -1118,6 +1185,25 @@ fetch backward 10 from cur;
 REFCURSOR can be passed around the function calls
 
 
+```sql
+CREATE FUNCTION myfunc(refcursor, refcursor) RETURNS SETOF refcursor AS $$
+BEGIN
+OPEN $1 FOR SELECT * FROM table_1;
+RETURN NEXT $1;
+OPEN $2 FOR SELECT * FROM table_2;
+RETURN NEXT $2;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE FUNCTION myfunc2(cur1 refcursor, cur2 refcursor)
+RETURNS VOID AS $$
+BEGIN
+OPEN cur1 FOR SELECT * FROM table_1;
+OPEN cur2 FOR SELECT * FROM table_2;
+END;
+$$ LANGUAGE plpgsql;
+```
+
 
 ### Table
 
@@ -1157,22 +1243,6 @@ CASE without an ELSE branch will throw a CASE_NOT_FOUND if there is no match
 * FOREACH x SLICE 1 IN ARRAY $1 LOOP (...) END LOOP; -> SLICE indicates the dimension of the loop in which array is traversed. If not defined then the elements are traversed in storage order. **IMPORTANT**: if the ARRAY of the FOREACH statement is NULL then an exception will be thrown
 
 
-EXCEPTION handling block: only use them when needed because they are expensive to enter and exit
-
-```sql
--- use either the sql state code or the name in the EXCEPTION block
--- https://www.postgresql.org/docs/current/errcodes-appendix.html
-BEGIN
-  -- statements
-EXCEPTION
--- SQLSTATE SQLERR
--- GET STACKED DIAGNOSTICS
--- https://www.postgresql.org/docs/current/plpgsql-statements.html
-  -- WHEN condition THEN handler_statements
-END
-```
-
-
 ### ARRAY
 
 First element is index 1 but it is possible to explicity assign a value to the index 0 and to negative indices.
@@ -1186,6 +1256,68 @@ SELECT * FROM unnest(ARRAY['ONE', 'TWO', 'THREE']) AS arr_element;
 * ||: used to append values. Example: v_dup:= v_dup||v_arr[idx];
 * v_arr:= array_append(v_arr, 'FOUR'); // works like ||
 * array_cat(v_arr1, v_arr2); // merge two arrays
+
+
+### EXCEPTION
+
+```sql
+-- rows impacted by last statement
+GET DIAGNOSTICS <variable> = ROW_COUNT;
+-- last statement's context. Gives the call stack where GET DIAGNOSTICS was executed from
+GET DIAGNOSTICS <variable> = PG_CONTEXT;
+-- true if last statement returned any row
+FOUND
+```
+
+EXCEPTION handling block: only use them when needed because they are expensive to enter and exit
+
+```sql
+BEGIN
+  -- statements
+EXCEPTION
+-- SQLSTATE SQLERR
+-- GET STACKED DIAGNOSTICS
+-- https://www.postgresql.org/docs/current/plpgsql-statements.html
+  -- WHEN condition THEN handler_statements
+END
+```
+
+```sql
+BEGIN
+ -- code block
+  IF condition THEN
+    RAISE EXCEPTION USING MESSAGE='This is error message', DETAIL='These are the details about this error', HINT='Hint message which may fix this error',ERRCODE='P1234';
+    RETURN FALSE;
+  END IF;
+ RETURN TRUE;
+EXCEPTION
+-- https://www.postgresql.org/docs/current/errcodes-appendix.html
+ WHEN SQLSTATE '<error_number>' THEN
+ -- handle the unique constraint violation error
+ WHEN SQLSTATE '23502' THEN
+    RAISE NOTICE 'customer error: not-null violation error';
+    RETURN FALSE;
+ WHEN OTHERS THEN
+    err_num := SQLSTATE;
+    err_msg := SUBSTR(SQLERRM, 100);
+    -- to retrieve info about the latest exception
+    -- GET STACKED DIAGNOSTICS err_msg = MESSAGE_TEXT;
+    RAISE NOTICE 'other error is: %:%', err_num, err_msg;
+    RETURN FALSE;
+END;
+```
+
+```sql
+DO
+$$
+BEGIN
+ ASSERT 1=1, 'this assertion should not raise';
+ ASSERT 1=0, 'assertion failed, as 1 is not equal to 0';
+END;
+$$;
+-- ERROR: assertion failed, as 1 is not equal to 0
+-- CONTEXT: PL/pgSQL function inline_code_block line 4 at ASSERT
+```
 
 
 
@@ -1320,6 +1452,9 @@ select * from pg_stat_database;
 -- Tables
 select * from pg_stat_user_tables;
 
+-- Indexes
+select * from pg_stat_user_indexes order by idx_scan;
+
 -- Disk IO
 select * from pg_statio_user_tables;
 
@@ -1337,6 +1472,115 @@ select * from pg_stat_all_tables;
 
 -- Settings
 select * from pg_settings;
+
+-- Table size
+select pg_relation_size('bookings');
+
+select quote_ident(table_schema)||'.'||quote_ident(table_name) as name
+,pg_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) as size
+from information_schema.tables where table_schema not in ('information_schema', 'pg_catalog')
+order by size desc limit 10;
+
+-- Constraints of a table
+select * from pg_constraint where confrelid = 'members'::regclass;
+
+-- Highest average execution time
+SELECT query, total_exec_time/calls AS avg, calls FROM pg_stat_statements ORDER BY 2 DESC;
+
+-- HOT -> Heap Only Tuples
+CREATE OR REPLACE VIEW av_needed AS
+SELECT N.nspname, C.relname
+, pg_stat_get_tuples_inserted(C.oid) AS n_tup_ins
+, pg_stat_get_tuples_updated(C.oid) AS n_tup_upd
+, pg_stat_get_tuples_deleted(C.oid) AS n_tup_del
+, CASE WHEN pg_stat_get_tuples_updated(C.oid) > 0
+ THEN pg_stat_get_tuples_hot_updated(C.oid)::real
+ / pg_stat_get_tuples_updated(C.oid)
+ END AS HOT_update_ratio
+, pg_stat_get_live_tuples(C.oid) AS n_live_tup
+, pg_stat_get_dead_tuples(C.oid) AS n_dead_tup
+, C.reltuples AS reltuples
+, round(COALESCE(threshold.custom, current_setting('autovacuum_vacuum_threshold'))::integer
+ + COALESCE(scale_factor.custom, current_setting('autovacuum_vacuum_scale_factor'))::numeric
+ * C.reltuples)
+ AS av_threshold
+, date_trunc('minute',
+ greatest(pg_stat_get_last_vacuum_time(C.oid),
+ pg_stat_get_last_autovacuum_time(C.oid)))
+ AS last_vacuum
+, date_trunc('minute',
+ greatest(pg_stat_get_last_analyze_time(C.oid),
+ pg_stat_get_last_analyze_time(C.oid)))
+ AS last_analyze
+, pg_stat_get_dead_tuples(C.oid) >
+ round( current_setting('autovacuum_vacuum_threshold')::integer
+ + current_setting('autovacuum_vacuum_scale_factor')::numeric
+ * C.reltuples)
+ AS av_needed
+, CASE WHEN reltuples > 0
+ THEN round(100.0 * pg_stat_get_dead_tuples(C.oid) / reltuples)
+ ELSE 0 END
+ AS pct_dead
+FROM pg_class C
+LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+NATURAL LEFT JOIN LATERAL (
+ SELECT (regexp_match(unnest,'^[^=]+=(.+)$'))[1]
+ FROM unnest(reloptions)
+ WHERE unnest ~ '^autovacuum_vacuum_threshold='
+) AS threshold(custom)
+NATURAL LEFT JOIN LATERAL (
+ SELECT (regexp_match(unnest,'^[^=]+=(.+)$'))[1]
+ FROM unnest(reloptions)
+ WHERE unnest ~ '^autovacuum_vacuum_scale_factor='
+) AS scale_factor(custom)
+WHERE C.relkind IN ('r', 't', 'm')
+ AND N.nspname NOT IN ('pg_catalog', 'information_schema')
+ AND N.nspname NOT LIKE 'pg_toast%'
+ORDER BY av_needed DESC, n_dead_tup DESC;
+
+-- Bloated index:
+SELECT
+ nspname,relname,
+ round(100 * pg_relation_size(indexrelid) / pg_relation_size(indrelid))
+/ 100
+ AS index_ratio,
+ pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
+ pg_size_pretty(pg_relation_size(indrelid)) AS table_size
+FROM pg_index I
+LEFT JOIN pg_class C ON (C.oid = I.indexrelid)
+LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
+WHERE
+ nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') AND
+ C.relkind='i' AND
+ pg_relation_size(indrelid) > 0;
+
+-- Index usage:
+CREATE OR REPLACE VIEW table_stats AS
+SELECT
+ stat.relname AS relname,
+seq_scan, seq_tup_read, idx_scan, idx_tup_fetch,
+heap_blks_read, heap_blks_hit, idx_blks_read, idx_blks_hit
+FROM
+ pg_stat_user_tables stat
+RIGHT JOIN pg_statio_user_tables statio
+ON stat.relid=statio.relid;
+
+-- Invalid Indexes
+SELECT ir.relname AS indexname
+, it.relname AS tablename
+, n.nspname AS schemaname
+FROM pg_index i
+JOIN pg_class ir ON ir.oid = i.indexrelid
+JOIN pg_class it ON it.oid = i.indrelid
+JOIN pg_namespace n ON n.oid = it.relnamespace
+WHERE NOT i.indisvalid;
+
+-- Reset statistics
+select pg_stat_reset();
+
+-- reltuples -> n of rows, relpages -> n of pages (8K size each)
+SELECT relname,relpages,reltuples, round(reltuples / relpages) AS rows_per_page FROM pg_class WHERE relname='table_name';
+SELECT relname,relpages,reltuples, round(reltuples / relpages) AS rows_per_page FROM pg_class WHERE relname='index_name';
 ```
 
 ## pgexercises
@@ -1414,6 +1658,12 @@ https://tapoueh.org/blog/2018/07/postgresql-event-based-processing/
 
 https://severalnines.com/blog/postgresql-triggers-and-stored-function-basics
 
+https://www.postgresql.org/docs/current/sql-createtrigger.html
+
+https://www.postgresql.org/docs/current/event-trigger-matrix.html
+
+https://www.postgresql.org/docs/current/functions-event-triggers.html
+
 Trigger execution order:
 timing AFTER / BEFORE
 ordered alphabetically by trigger_name (later trigger will received the updated data from the previous triggers)
@@ -1424,6 +1674,90 @@ order by action_timing desc, trigger_name
 ;
 ```
 
+To avoid a stack overflow use `pg_trigger_depth`
+
+```sql
+CREATE OR REPLACE FUNCTION trigger_function()
+RETURNS TRIGGER AS $$
+DECLARE
+  nested_trigger_depth INTEGER;
+BEGIN
+  nested_trigger_depth := pg_trigger_depth();
+-- Perform different actions based on the trigger depth
+  CASE nested_trigger_depth
+  WHEN 1 THEN
+    RAISE NOTICE 'This is the outermost trigger';
+  WHEN 2 THEN
+    RAISE NOTICE 'This is the first nested trigger, and stop further nested calls';
+    RETURN NEW;
+  ELSE
+    RAISE NOTICE 'This is a nested trigger at depth %', nested_trigger_depth;
+  END CASE;
+  INSERT INTO test(name) VALUES ('Test2');
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Or
+
+CREATE TRIGGER trg_taxonomic_positions
+AFTER INSERT OR UPDATE OF taxonomic_position
+ON taxon_concepts
+FOR EACH ROW
+WHEN (pg_trigger_depth() = 0)
+EXECUTE PROCEDURE trg_taxonomic_positions()
+```
+
+[INSTEAD OF](https://www.postgresql.org/docs/current/sql-createtrigger.html) for triggers on views
+
+The parameters available in the trigger function body are:
+
+* OLD/NEW: old/new record
+* TG_OP: string (INSERT, UPDATE, DELETE or TRUNCATE)
+* TG_NAME: variable holding the name of the trigger. Useful when there are multiple triggers on the same table
+* TG_WHEN: string (BEFORE, AFTER, INSTEAD OF)
+* TG_LEVEL: string (ROW, STATEMENT)
+* TG_TABLE_NAME: string
+* TG_RELNAME: like TG_TABLE_NAME
+* TG_RELID: table ID
+* TG_TABLE_SCHEMA: string
+* TG_NARGS: count of arguments
+* TG_ARGV[]: arguments array
+
+**Event Triggers** are trigger not related to a specific table
+
+See https://www.postgresql.org/docs/current/event-trigger-matrix.html
+
+`current_query()` returns the executed query
+
+The function must return **event_trigger**
+
+```sql
+CREATE OR REPLACE FUNCTION log_ddl_event() RETURNS event_trigger AS $$
+DECLARE
+  rec RECORD;
+BEGIN
+-- See https://www.postgresql.org/docs/current/functions-event-triggers.html
+ rec := pg_event_trigger_ddl_commands();
+ INSERT INTO ddl_log (event_type, event_time, object_name, statement)
+ VALUES (tg_tag, current_timestamp, rec.object_identity, current_query());
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE EVENT TRIGGER ddl_event_trigger ON ddl_command_end EXECUTE PROCEDURE log_ddl_event();
+
+CREATE EVENT TRIGGER track_ddl_event ON ddl_command_start
+WHEN TAG IN ('CREATE TABLE', 'DROP TABLE', 'ALTER TABLE')
+EXECUTE PROCEDURE track_ddl_function();
+```
+
+To drop a trigger:
+
+```sql
+DROP TRIGGER insert_customer_report ON customers;
+DROP EVENT TRIGGER ddl_event_trigger;
+```
+
 
 ## Transaction
 
@@ -1432,6 +1766,35 @@ begin;
 select txid_current();
 rollback;
 ```
+
+COMMIT and EXCEPTION blocks should not be in a single BEGIN END block in that order. The reason is the way transactions are handled inside the PL/pgSQL blocks. Each BEGIN END block creates an implicit subtransaction with the help of SAVEPOINT.
+
+```sql
+BEGIN
+ --- Statements
+<<COMMIT/ROLLBACK>>
+EXCEPTION WHEN others THEN
+ --- Handle exception
+END
+```
+
+is converted to
+
+```sql
+BEGIN
+ SAVEPOINT one;
+ --- Statements
+<<COMMIT/ROLLBACK>>
+ RELEASE SAVEPOINT one;
+ EXCEPTION WHEN others THEN
+ ROLLBACK TO SAVEPOINT one;
+ --- Handle exception
+END
+```
+
+If there is an exception then the exception ROLLBACK can't be executed because the COMMIT command has already be executed.
+
+COMMIT/ROLLBACK should be put as the last executable statement of the procedure.
 
 ## CTE
 
@@ -1444,6 +1807,14 @@ CTEs are materialized so the planner can't fully optimize them
 
 
 ## Custom Operator
+
+https://www.postgresql.org/docs/current/sql-createoperator.html
+
+https://www.postgresql.org/docs/current/xoper.html
+
+https://www.postgresql.org/docs/current/xoper-optimization.html
+
+https://www.postgresql.org/docs/current/xindex.html
 
 ```sql
 create or replace function add_string(varchar, varchar)
@@ -1468,8 +1839,19 @@ create operator + (
 select 'hello ' + 'world';
 ```
 
+To help the planner optimize the query:
+
+* define a commuter A of the operator B such that: x A y = y B x
+```sql
+CREATE OPERATOR > (LEFTARG=integer, RIGHTARG=integer, PROCEDURE=comp, COMMUTATOR = <)
+```
+* define a negator of the operator
+CREATE OPERATOR = (LEFTARG=integer, RIGHTARG=integer, PROCEDURE=comp, COMMUTATOR = <>)
+
 
 ## Custom Cast
+
+https://www.postgresql.org/docs/current/sql-createcast.html
 
 ```sql
 create type fahrenheit as (value numeric(10,2));
@@ -1490,6 +1872,14 @@ select t::numeric::fahrenheit from generate_series(1,10) as seq(t);
 select (t::numeric::fahrenheit).value from generate_series(1,10) as seq(t);
 ```
 
+
+## Custom Aggregate
+
+https://www.postgresql.org/docs/current/functions-aggregate.html
+
+https://www.postgresql.org/docs/current/xaggr.html
+
+
 ## Temporary Functions
 
 Temporary functions should be defined in the `pg_temp` schema.
@@ -1502,6 +1892,44 @@ begin
 end;
 $$ language plpgsql immutable;
 ```
+
+
+## Dynamic SQL
+
+Postgres can save the execution plan of a prepared staement (or function) when it is called for the first time.
+
+By executing dynamic SQL we are guaranteed that the execution plan will be evaluated and optimized for the specific values it's called with (crucial in some cases for function calls). There are cases where different parameters can lead to different execution plans based on the statistics and distribution of the values. In some other cases (when the executions would always be the same) it is beneficial to only plan once saving CPU computations.
+
+```sql
+CREATE OR REPLACE FUNCTION select_booking_leg_country_dynamic(
+ p_country text,
+ p_updated timestamptz)
+RETURNS setof booking_leg_part AS
+$body$
+BEGIN
+RETURN QUERY
+EXECUTE $$
+SELECT
+ departure_airport,
+ booking_id,
+ is_returning
+FROM booking_leg bl
+JOIN flight f USING (flight_id)
+WHERE departure_airport IN
+ (SELECT
+ airport_code
+ FROM airport
+--  quote_literal is to guard against SQL injection
+ WHERE iso_country=$$|| quote_literal(p_country) || $$ )
+ AND bl.booking_id IN
+ (SELECT
+ booking_id
+ FROM booking
+ WHERE update_ts>$$|| quote_literal(p_updated)||$$)$$;
+END;
+$body$ LANGUAGE plpgsql;
+```
+
 
 
 
@@ -1539,13 +1967,192 @@ https://www.cybertec-postgresql.com/en/postgresql-count-made-fast/
 Count estimation (between -10% and +10%):
 
 ```sql
-SELECT reltuples::bigint
-FROM pg_catalog.pg_class
-WHERE relname = 'mytable';
+SELECT reltuples FROM pg_catalog.pg_class WHERE relname = 'mytable';
 ```
 
+### JOINS
+
+Main point: reduce the size of the intermediate dataset
+
+The most restrictive joins (i.e., joins that reduce the result set size the most) should be executed first.
+
+Semi-joins and Anti-joins (select ... where [not] exists (...) / where .. [not] in (...)) never increase the size of the result set; check whether it is beneficial to apply them first.
+
+Force a specific join order by setting the join_collapse_limit parameter to 1.
+
+To reduce the size of hash table size (used in Hash Joins), only select the columns that are needed.
+
+
+### GROUP BY
+
+For all columns used in the GROUP BY clause, filtering should be pushed inside the grouping.
+
+Group First, Select Last
+
+```sql
+SELECT
+ city,
+ date_trunc('month', scheduled_departure) AS month,
+ count(*) passengers
+FROM airport a
+JOIN flight f ON airport_code = departure_airport
+JOIN booking_leg l ON f.flight_id =l.flight_id
+JOIN boarding_pass b ON b.booking_leg_id = l.booking_leg_id
+GROUP BY 1,2
+ORDER BY 3 DESC
+
+-- More performant version
+SELECT
+ city,
+ date_trunc('month', scheduled_departure),
+ sum(passengers) passengers
+FROM airport a
+JOIN flight f ON airport_code = departure_airport
+JOIN (
+ SELECT flight_id, count(*) passengers
+ FROM booking_leg l
+ JOIN boarding_pass b USING (booking_leg_id)
+ GROUP BY flight_id
+ ) cnt USING (flight_id)
+GROUP BY 1,2
+ORDER BY 3 DESC
+```
+
+### SET OPERATIONS
+
+Use set operations to (sometimes) prompt an alternative execution plan and improve readability.
+
+* Use EXCEPT instead of NOT EXISTS and NOT IN.
+* Use INTERSECT instead of EXISTS and IN.
+* Use UNION instead of complex selection criteria with OR.
+
+If the query aren't correlated with each other then thy can run in parallel.
+
+
+### FILTER
+
+When retrieving multiple attributes from an entity-attribute-value table, join to the table only once and use FILTER in the aggregate function MAX() in SELECT list to return the appropriate values in each column.
+
+
+```sql
+-- 3 Scans on table custom_field
+SELECT
+ first_name,
+ last_name,
+ pn.custom_field_value AS passport_num,
+ pe.custom_field_value AS passport_exp_date,
+ pc.custom_field_value AS passport_country
+FROM passenger p
+JOIN custom_field pn ON pn.passenger_id=p.passenger_id AND pn.custom_field_name='passport_num'
+JOIN custom_field pe ON pe.passenger_id=p.passenger_id AND pe.custom_field_name='passport_exp_date'
+JOIN custom_field pc ON pc.passenger_id=p.passenger_id AND pc.custom_field_name='passport_country'
+WHERE p.passenger_id<5000000
+
+-- Single Scan on table custom_field
+SELECT
+ last_name,
+ first_name,
+ passport_num,
+ passport_exp_date,
+ passport_country
+FROM passenger p
+JOIN (
+SELECT
+ cf.passenger_id,
+ coalesce(max (custom_field_value ) FILTER (WHERE custom_field_name ='passport_num' ),'') AS passport_num,
+ coalesce(max (custom_field_value ) FILTER (WHERE custom_field_name ='passport_exp_date' ),'') AS passport_exp_date,
+ coalesce(max (custom_field_value ) FILTER (WHERE custom_field_name ='passport_country' ),'') AS passport_country
+FROM custom_field cf
+WHERE cf.passenger_id<5000000
+GROUP BY 1
+ ) info USING (passenger_id)
+WHERE p.passenger_id<5000000
+```
+
+### PARTITIONING
+
+*  the partitioning key should be used in (almost) all queries that run on this table, or at least in critical queries,
+*  these values should be known prior to the SQL statement execution
+*  an index on a partition, most likely, will eliminate only one level of the B-tree, while the choice of needed partition also requires some amount of resources
+
+```sql
+CREATE TABLE boarding_pass_part (
+ boarding_pass_id SERIAL,
+ passenger_id BIGINT NOT NULL,
+ booking_leg_id BIGINT NOT NULL,
+ seat TEXT,
+ boarding_time TIMESTAMPTZ,
+ precheck BOOLEAN,
+ update_ts TIMESTAMPTZ
+)
+PARTITION BY RANGE (boarding_time);
+
+CREATE TABLE boarding_pass_may
+PARTITION OF boarding_pass_part
+FOR VALUES
+FROM ('2023-05-01'::timestamptz)
+TO ('2023-06-01'::timestamptz) ;
+--
+CREATE TABLE boarding_pass_june
+PARTITION OF boarding_pass_part
+FOR VALUES
+FROM ('2023-06-01'::timestamptz)
+TO ('2023-07-01'::timestamptz);
+
+INSERT INTO boarding_pass_part SELECT * from boarding_pass;
+```
+
+
+### Flowchart
+
+<picture style="margin-left: auto;margin-right: auto; display: block; width: 50%">
+  <img src="./img/optimizationFlowchart.svg"/>
+</picture>
+
+
+* short? if the numbe of returned rows is small. See if it is possible with the business to restrict the returned set (example only rows for a certain period)
+* short:
+  * the most restrictive criteria: query the tables and find out the least frequent values
+  * check the indexes: are the attribute of the above step being indexed? is it possible to index-only scan? compound index?
+  * exessive selection criterion: only when no index can be applied
+  * build the query: build the select query bottom (most restrictive) up and check with explain analyze each of the steps. Consider CTEs or dynamic SQL
+* incremental? (meaning only pull the data since the previous pull, example daily reports)
+* long:
+  * most restrictive join: try also semi-join or anti-join. Build the joins steps by steps and check the execution planning
+  * don't perform multiple sequential scan on the same table
+  * group first, select last
+
+
+
+
+
+## Extensions:
+
+```sql
+SELECT * FROM pg_extension;
+```
+
+* [plprofiler](https://github.com/bigsql/plprofiler?tab=readme-ov-file)
+* [plpgsql_check](https://github.com/okbob/plpgsql_check?tab=readme-ov-file)
 
 
 ## Other
 
-https://wiki.postgresql.org/wiki/Don't_Do_This
+* Use `IDENTITY` (Postgres 10 or later) as primary key instead of `SERIAL`
+
+```sql
+CREATE TABLE people (
+   people_id bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+   first_name varchar,
+   last_name varchar
+)
+```
+
+* pg_sleep(n) to stop the execution for n seconds
+
+* https://wiki.postgresql.org/wiki/Don't_Do_This
+* https://www.citusdata.com/blog/2019/07/17/postgres-tips-for-average-and-power-user/
+* gitlab.com/microo8/plgo
+* https://medium.com/avitotech/how-to-work-with-postgres-in-go-bad2dabd13e4
+* https://hakibenita.com/sql-dos-and-donts
+* https://www.cybertec-postgresql.com/en/abusing-postgresql-as-an-sql-beautifier/

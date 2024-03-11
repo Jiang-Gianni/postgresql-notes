@@ -8,38 +8,13 @@ import (
 	"database/sql"
 )
 
+type Account struct {
+	AccountID int32 `json:"account_id"`
+	Balance   int32 `json:"balance"`
+}
+
 type Dndclass struct {
 	ID       int32          `json:"id"`
 	ParentID sql.NullInt32  `json:"parent_id"`
 	Name     sql.NullString `json:"name"`
-}
-
-type Foo struct {
-	Fooid    sql.NullInt32  `json:"fooid"`
-	Foosubid sql.NullInt32  `json:"foosubid"`
-	Fooname  sql.NullString `json:"fooname"`
-}
-
-type Onlyfib struct {
-	I sql.NullInt32 `json:"i"`
-}
-
-type Payroll struct {
-	EmpNo     sql.NullInt32 `json:"emp_no"`
-	EmpName   string        `json:"emp_name"`
-	DeptName  string        `json:"dept_name"`
-	SalaryAmt string        `json:"salary_amt"`
-}
-
-type Product struct {
-	ID       sql.NullInt32   `json:"id"`
-	Name     sql.NullString  `json:"name"`
-	Quantity sql.NullFloat64 `json:"quantity"`
-}
-
-type ProductsCitu struct {
-	ProductNo sql.NullInt32  `json:"product_no"`
-	Name      sql.NullString `json:"name"`
-	Price     sql.NullString `json:"price"`
-	SalePrice sql.NullString `json:"sale_price"`
 }

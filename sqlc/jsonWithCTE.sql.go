@@ -14,19 +14,19 @@ const dndGetClasses = `-- name: DndGetClasses :many
 select id, parent_id, name from dndclasses
 `
 
-func (q *Queries) DndGetClasses(ctx context.Context) ([]Dndclass, error) {
+func (q *Queries) DndGetClasses(ctx context.Context) ([]*Dndclass, error) {
 	rows, err := q.db.QueryContext(ctx, dndGetClasses)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Dndclass
+	var items []*Dndclass
 	for rows.Next() {
 		var i Dndclass
 		if err := rows.Scan(&i.ID, &i.ParentID, &i.Name); err != nil {
 			return nil, err
 		}
-		items = append(items, i)
+		items = append(items, &i)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
