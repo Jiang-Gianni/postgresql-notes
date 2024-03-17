@@ -1,0 +1,129 @@
+ accounts :{                                     
+   shape: sql_table                              
+   account_id: int4 {constraint: primary_key}    
+   balance: int4                                 
+ }                                               
+                                                 
+                                                 
+ 
+ bookings :{                                     
+   shape: sql_table                              
+   bookid: int4 {constraint: primary_key}        
+   facid: int4 {constraint: foreign_key}         
+   memid: int4 {constraint: foreign_key}         
+   starttime: timestamp                          
+   slots: int4                                   
+ }                                               
+                                                 
+ bookings.facid -> facilities.facid              
+ bookings.memid -> members.memid                 
+ 
+ dndclasses :{                                   
+   shape: sql_table                              
+   id: int4 {constraint: primary_key}            
+   parent_id: int4 {constraint: foreign_key}     
+   name: text                                    
+ }                                               
+                                                 
+ dndclasses.parent_id -> dndclasses.id           
+ 
+ facilities :{                                   
+   shape: sql_table                              
+   facid: int4 {constraint: primary_key}         
+   name: varchar                                 
+   membercost: numeric                           
+   guestcost: numeric                            
+   initialoutlay: numeric                        
+   monthlymaintenance: numeric                   
+ }                                               
+                                                 
+                                                 
+ 
+ foo :{                                          
+   shape: sql_table                              
+   fooid: int4                                   
+   foosubid: int4                                
+   fooname: text                                 
+ }                                               
+                                                 
+                                                 
+ 
+ members :{                                      
+   shape: sql_table                              
+   memid: int4 {constraint: primary_key}         
+   surname: varchar                              
+   firstname: varchar                            
+   address: varchar                              
+   zipcode: int4                                 
+   telephone: varchar                            
+   recommendedby: int4 {constraint: foreign_key} 
+   joindate: timestamp                           
+ }                                               
+                                                 
+ members.recommendedby -> members.memid          
+ 
+ onlyfib :{                                      
+   shape: sql_table                              
+   i: int4                                       
+ }                                               
+                                                 
+                                                 
+ 
+ payroll :{                                      
+   shape: sql_table                              
+   emp_no: int4                                  
+   emp_name: varchar                             
+   dept_name: varchar                            
+   salary_amt: numeric                           
+ }                                               
+                                                 
+                                                 
+ 
+ products :{                                     
+   shape: sql_table                              
+   id: int4                                      
+   name: text                                    
+   quantity: float8                              
+ }                                               
+                                                 
+                                                 
+ 
+ products_citus :{                               
+   shape: sql_table                              
+   product_no: int4                              
+   name: text                                    
+   price: numeric                                
+   sale_price: numeric                           
+ }                                               
+                                                 
+                                                 
+ 
+ schema_migrations :{                            
+   shape: sql_table                              
+   version: varchar {constraint: primary_key}    
+ }                                               
+                                                 
+                                                 
+ 
+ table1 :{                                       
+   shape: sql_table                              
+   key: int4 {constraint: primary_key}           
+   value: int4                                   
+   value_type: varchar                           
+ }                                               
+                                                 
+                                                 
+ 
+ table2 :{                                       
+   shape: sql_table                              
+   key: int4                                     
+   value: int4                                   
+   value_type: varchar                           
+   user_name: name                               
+   action: varchar                               
+   action_time: timestamp                        
+ }                                               
+                                                 
+                                                 
+ 
+

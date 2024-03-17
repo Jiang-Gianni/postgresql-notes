@@ -86,8 +86,10 @@ CREATE FUNCTION public.assert(in_assertion boolean, in_errormessage text) RETURN
     LANGUAGE plpgsql IMMUTABLE
     AS $$
   begin
-      assert in_assertion, format('%s', in_errormessage);
-      return in_assertion;
+    if not in_assertion
+    then raise exception '%', in_errormessage;
+    end if;
+    return in_assertion;
   end;
 $$;
 
@@ -250,17 +252,6 @@ $$;
 ALTER FUNCTION public.notify_event() OWNER TO root;
 
 --
--- Name: raise_exception(text); Type: FUNCTION; Schema: public; Owner: root
---
-
-CREATE FUNCTION public.raise_exception(message text) RETURNS void
-    LANGUAGE plpgsql
-    AS $$ begin raise exception '%', message; end; $$;
-
-
-ALTER FUNCTION public.raise_exception(message text) OWNER TO root;
-
---
 -- Name: shadow(); Type: FUNCTION; Schema: public; Owner: root
 --
 
@@ -320,8 +311,8 @@ CREATE FUNCTION public.transfermoney(in_acc_from integer, in_acc_to integer, amo
             returning *
         )
         select
-        assert( bool_and(balance > 0), 'negative balance') as balance_check,
-        assert( count(*) = 2, 'account not found') as account_found
+            assert( bool_and(balance > 0), 'negative balance') as balance_check,
+            assert( count(*) = 2, 'account not found') as account_found
         from updated_rows into discard;
         return;
     end;
@@ -376,45 +367,6 @@ ALTER SEQUENCE public.accounts_account_id_seq OWNER TO root;
 
 ALTER SEQUENCE public.accounts_account_id_seq OWNED BY public.accounts.account_id;
 
-
---
--- Name: av_needed; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.av_needed AS
- SELECT n.nspname,
-    c.relname,
-    pg_stat_get_tuples_inserted(c.oid) AS n_tup_ins,
-    pg_stat_get_tuples_updated(c.oid) AS n_tup_upd,
-    pg_stat_get_tuples_deleted(c.oid) AS n_tup_del,
-        CASE
-            WHEN (pg_stat_get_tuples_updated(c.oid) > 0) THEN ((pg_stat_get_tuples_hot_updated(c.oid))::real / (pg_stat_get_tuples_updated(c.oid))::double precision)
-            ELSE NULL::double precision
-        END AS hot_update_ratio,
-    pg_stat_get_live_tuples(c.oid) AS n_live_tup,
-    pg_stat_get_dead_tuples(c.oid) AS n_dead_tup,
-    c.reltuples,
-    round((((COALESCE(threshold.custom, current_setting('autovacuum_vacuum_threshold'::text)))::integer)::double precision + (((COALESCE(scale_factor.custom, current_setting('autovacuum_vacuum_scale_factor'::text)))::numeric)::double precision * c.reltuples))) AS av_threshold,
-    date_trunc('minute'::text, GREATEST(pg_stat_get_last_vacuum_time(c.oid), pg_stat_get_last_autovacuum_time(c.oid))) AS last_vacuum,
-    date_trunc('minute'::text, GREATEST(pg_stat_get_last_analyze_time(c.oid), pg_stat_get_last_analyze_time(c.oid))) AS last_analyze,
-    ((pg_stat_get_dead_tuples(c.oid))::double precision > round((((current_setting('autovacuum_vacuum_threshold'::text))::integer)::double precision + (((current_setting('autovacuum_vacuum_scale_factor'::text))::numeric)::double precision * c.reltuples)))) AS av_needed,
-        CASE
-            WHEN (c.reltuples > (0)::double precision) THEN round((((100.0 * (pg_stat_get_dead_tuples(c.oid))::numeric))::double precision / c.reltuples))
-            ELSE (0)::double precision
-        END AS pct_dead
-   FROM (((pg_class c
-     LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
-     LEFT JOIN LATERAL ( SELECT (regexp_match(unnest.unnest, '^[^=]+=(.+)$'::text))[1] AS regexp_match
-           FROM unnest(c.reloptions) unnest(unnest)
-          WHERE (unnest.unnest ~ '^autovacuum_vacuum_threshold='::text)) threshold(custom) ON TRUE)
-     LEFT JOIN LATERAL ( SELECT (regexp_match(unnest.unnest, '^[^=]+=(.+)$'::text))[1] AS regexp_match
-           FROM unnest(c.reloptions) unnest(unnest)
-          WHERE (unnest.unnest ~ '^autovacuum_vacuum_scale_factor='::text)) scale_factor(custom) USING (custom))
-  WHERE ((c.relkind = ANY (ARRAY['r'::"char", 't'::"char", 'm'::"char"])) AND (n.nspname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name])) AND (n.nspname !~~ 'pg_toast%'::text))
-  ORDER BY ((pg_stat_get_dead_tuples(c.oid))::double precision > round((((current_setting('autovacuum_vacuum_threshold'::text))::integer)::double precision + (((current_setting('autovacuum_vacuum_scale_factor'::text))::numeric)::double precision * c.reltuples)))) DESC, (pg_stat_get_dead_tuples(c.oid)) DESC;
-
-
-ALTER VIEW public.av_needed OWNER TO root;
 
 --
 -- Name: bookings; Type: TABLE; Schema: public; Owner: root
@@ -475,24 +427,6 @@ CREATE TABLE public.facilities (
 ALTER TABLE public.facilities OWNER TO root;
 
 --
--- Name: index_info; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.index_info AS
- SELECT n.nspname,
-    c.relname,
-    (round((((100 * pg_relation_size((i.indexrelid)::regclass)) / pg_relation_size((i.indrelid)::regclass)))::double precision) / (100)::double precision) AS index_ratio,
-    pg_size_pretty(pg_relation_size((i.indexrelid)::regclass)) AS index_size,
-    pg_size_pretty(pg_relation_size((i.indrelid)::regclass)) AS table_size
-   FROM ((pg_index i
-     LEFT JOIN pg_class c ON ((c.oid = i.indexrelid)))
-     LEFT JOIN pg_namespace n ON ((n.oid = c.relnamespace)))
-  WHERE ((n.nspname <> ALL (ARRAY['pg_catalog'::name, 'information_schema'::name, 'pg_toast'::name])) AND (c.relkind = 'i'::"char") AND (pg_relation_size((i.indrelid)::regclass) > 0));
-
-
-ALTER VIEW public.index_info OWNER TO root;
-
---
 -- Name: members; Type: TABLE; Schema: public; Owner: root
 --
 
@@ -509,17 +443,6 @@ CREATE TABLE public.members (
 
 
 ALTER TABLE public.members OWNER TO root;
-
---
--- Name: my_table; Type: TABLE; Schema: public; Owner: root
---
-
-CREATE TABLE public.my_table (
-    n integer
-);
-
-
-ALTER TABLE public.my_table OWNER TO root;
 
 --
 -- Name: onlyfib; Type: TABLE; Schema: public; Owner: root
@@ -612,64 +535,6 @@ CREATE TABLE public.schema_migrations (
 ALTER TABLE public.schema_migrations OWNER TO root;
 
 --
--- Name: stats_by_jit; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.stats_by_jit AS
- SELECT ((((jit_generation_time + jit_inlining_time) + jit_optimization_time) + jit_emission_time) / (total_exec_time + total_plan_time)) AS jit_total_time_percent,
-    calls,
-    jit_functions,
-    jit_generation_time,
-    jit_inlining_count,
-    jit_inlining_time,
-    jit_optimization_count,
-    jit_optimization_time,
-    jit_emission_count,
-    jit_emission_time,
-    query
-   FROM public.pg_stat_statements
-  ORDER BY ((((jit_generation_time + jit_inlining_time) + jit_optimization_time) + jit_emission_time) / (total_exec_time + total_plan_time)) DESC
- LIMIT 50;
-
-
-ALTER VIEW public.stats_by_jit OWNER TO root;
-
---
--- Name: stats_by_slowest_query; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.stats_by_slowest_query AS
- SELECT ((mean_exec_time + mean_plan_time))::integer AS mean_time,
-    (mean_exec_time)::integer AS mean_exec_time,
-    (mean_plan_time)::integer AS mean_plan_time,
-    calls,
-    query
-   FROM public.pg_stat_statements
-  ORDER BY (((mean_exec_time + mean_plan_time))::integer) DESC
- LIMIT 50;
-
-
-ALTER VIEW public.stats_by_slowest_query OWNER TO root;
-
---
--- Name: stats_by_total_time; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.stats_by_total_time AS
- SELECT ((total_exec_time + total_plan_time))::integer AS total_time,
-    (total_exec_time)::integer AS total_exec_time,
-    (total_plan_time)::integer AS total_plan_time,
-    (mean_exec_time)::integer AS mean_exec_time,
-    calls,
-    query
-   FROM public.pg_stat_statements
-  ORDER BY (((total_exec_time + total_plan_time))::integer) DESC
- LIMIT 50;
-
-
-ALTER VIEW public.stats_by_total_time OWNER TO root;
-
---
 -- Name: table1; Type: TABLE; Schema: public; Owner: root
 --
 
@@ -743,26 +608,6 @@ ALTER SEQUENCE public.table2_key_seq OWNED BY public.table2.key;
 
 
 --
--- Name: table_stats; Type: VIEW; Schema: public; Owner: root
---
-
-CREATE VIEW public.table_stats AS
- SELECT stat.relname,
-    stat.seq_scan,
-    stat.seq_tup_read,
-    stat.idx_scan,
-    stat.idx_tup_fetch,
-    statio.heap_blks_read,
-    statio.heap_blks_hit,
-    statio.idx_blks_read,
-    statio.idx_blks_hit
-   FROM (pg_stat_user_tables stat
-     RIGHT JOIN pg_statio_user_tables statio ON ((stat.relid = statio.relid)));
-
-
-ALTER VIEW public.table_stats OWNER TO root;
-
---
 -- Name: accounts account_id; Type: DEFAULT; Schema: public; Owner: root
 --
 
@@ -794,8 +639,8 @@ ALTER TABLE ONLY public.table2 ALTER COLUMN key SET DEFAULT nextval('public.tabl
 -- Data for Name: accounts; Type: TABLE DATA; Schema: public; Owner: root
 --
 
-INSERT INTO public.accounts VALUES (2, 100);
 INSERT INTO public.accounts VALUES (1, 100);
+INSERT INTO public.accounts VALUES (2, 100);
 
 
 --
@@ -4930,62 +4775,6 @@ INSERT INTO public.members VALUES (37, 'Smith', 'Darren', '3 Funktown, Denzingto
 
 
 --
--- Data for Name: my_table; Type: TABLE DATA; Schema: public; Owner: root
---
-
-INSERT INTO public.my_table VALUES (1);
-INSERT INTO public.my_table VALUES (3);
-INSERT INTO public.my_table VALUES (5);
-INSERT INTO public.my_table VALUES (7);
-INSERT INTO public.my_table VALUES (9);
-INSERT INTO public.my_table VALUES (11);
-INSERT INTO public.my_table VALUES (13);
-INSERT INTO public.my_table VALUES (15);
-INSERT INTO public.my_table VALUES (17);
-INSERT INTO public.my_table VALUES (19);
-INSERT INTO public.my_table VALUES (21);
-INSERT INTO public.my_table VALUES (23);
-INSERT INTO public.my_table VALUES (25);
-INSERT INTO public.my_table VALUES (27);
-INSERT INTO public.my_table VALUES (29);
-INSERT INTO public.my_table VALUES (31);
-INSERT INTO public.my_table VALUES (33);
-INSERT INTO public.my_table VALUES (35);
-INSERT INTO public.my_table VALUES (37);
-INSERT INTO public.my_table VALUES (39);
-INSERT INTO public.my_table VALUES (41);
-INSERT INTO public.my_table VALUES (43);
-INSERT INTO public.my_table VALUES (45);
-INSERT INTO public.my_table VALUES (47);
-INSERT INTO public.my_table VALUES (49);
-INSERT INTO public.my_table VALUES (51);
-INSERT INTO public.my_table VALUES (53);
-INSERT INTO public.my_table VALUES (55);
-INSERT INTO public.my_table VALUES (57);
-INSERT INTO public.my_table VALUES (59);
-INSERT INTO public.my_table VALUES (61);
-INSERT INTO public.my_table VALUES (63);
-INSERT INTO public.my_table VALUES (65);
-INSERT INTO public.my_table VALUES (67);
-INSERT INTO public.my_table VALUES (69);
-INSERT INTO public.my_table VALUES (71);
-INSERT INTO public.my_table VALUES (73);
-INSERT INTO public.my_table VALUES (75);
-INSERT INTO public.my_table VALUES (77);
-INSERT INTO public.my_table VALUES (79);
-INSERT INTO public.my_table VALUES (81);
-INSERT INTO public.my_table VALUES (83);
-INSERT INTO public.my_table VALUES (85);
-INSERT INTO public.my_table VALUES (87);
-INSERT INTO public.my_table VALUES (89);
-INSERT INTO public.my_table VALUES (91);
-INSERT INTO public.my_table VALUES (93);
-INSERT INTO public.my_table VALUES (95);
-INSERT INTO public.my_table VALUES (97);
-INSERT INTO public.my_table VALUES (99);
-
-
---
 -- Data for Name: onlyfib; Type: TABLE DATA; Schema: public; Owner: root
 --
 
@@ -5060,15 +4849,15 @@ INSERT INTO public.table1 VALUES (5, 30, 'meters');
 -- Data for Name: table2; Type: TABLE DATA; Schema: public; Owner: root
 --
 
-INSERT INTO public.table2 VALUES (1, 30, 'meters', 'root', 'INSERT', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (2, 10, 'inches', 'root', 'INSERT', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'UPDATE', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'DELETE', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (3, 50, 'inches', 'root', 'INSERT', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (1, NULL, NULL, 'root', 'TRUNCATE', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'INSERT', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'DELETE', '2024-03-08 19:59:19.154014');
-INSERT INTO public.table2 VALUES (5, 30, 'meters', 'root', 'INSERT', '2024-03-08 19:59:19.154014');
+INSERT INTO public.table2 VALUES (1, 30, 'meters', 'root', 'INSERT', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (2, 10, 'inches', 'root', 'INSERT', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'UPDATE', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (2, 20, 'inches', 'root', 'DELETE', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (3, 50, 'inches', 'root', 'INSERT', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (1, NULL, NULL, 'root', 'TRUNCATE', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'INSERT', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (4, 50, 'inches', 'root', 'DELETE', '2024-03-16 21:46:13.910799');
+INSERT INTO public.table2 VALUES (5, 30, 'meters', 'root', 'INSERT', '2024-03-16 21:46:13.910799');
 
 
 --

@@ -6,7 +6,6 @@ require (
 	github.com/jackc/pgconn v1.14.3
 	github.com/jackc/pgx/v4 v4.18.2
 	github.com/lib/pq v1.10.9
-	golang.org/x/sync v0.0.0-20190423024810-112230192c58
 )
 
 require (

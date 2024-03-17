@@ -9,8 +9,10 @@ create or replace function assert ( in_assertion boolean, in_errormessage text)
 returns boolean immutable language plpgsql security invoker as
 $$
   begin
-      assert in_assertion, format('%s', in_errormessage);
-      return in_assertion;
+    if not in_assertion
+    then raise exception '%', in_errormessage;
+    end if;
+    return in_assertion;
   end;
 $$;
 

@@ -1,4 +1,4 @@
--- -- migrate:up
+-- migrate:up
 -- CREATE OR REPLACE VIEW av_needed AS
 -- SELECT N.nspname, C.relname
 -- , pg_stat_get_tuples_inserted(C.oid) AS n_tup_ins
@@ -157,7 +157,7 @@
 -- 	jit_total_time_percent desc
 -- limit 50;
 
--- -- migrate:down
+-- migrate:down
 -- drop view av_needed;
 -- drop view index_info;
 -- drop view table_stats;

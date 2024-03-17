@@ -10,10 +10,10 @@ func BenchmarkApplicationMoneyTransfer(b *testing.B) {
 	defer svc.db.Close()
 	var err error
 	ctx := context.Background()
-	// errgrp := errgroup.Group{}
 	for i := 0; i < b.N; i++ {
 
 		// WILL DEADLOCK
+		// errgrp := errgroup.Group{}
 		// errgrp.Go(func() error { return svc.TransferMoneyApp(ctx, 1, 2, 1) })
 		// errgrp.Go(func() error { return svc.TransferMoneyApp(ctx, 2, 1, 1) })
 		// err = errgrp.Wait()
@@ -37,8 +37,8 @@ func BenchmarkDatabaseCTEMoneyTransfer(b *testing.B) {
 	defer svc.db.Close()
 	var err error
 	ctx := context.Background()
-	// errgrp := errgroup.Group{}
 	for i := 0; i < b.N; i++ {
+		// errgrp := errgroup.Group{}
 		// errgrp.Go(func() error { return svc.TransferMoneyDBCTE(ctx, 1, 2, 1) })
 		// errgrp.Go(func() error { return svc.TransferMoneyDBCTE(ctx, 2, 1, 1) })
 		// err = errgrp.Wait()
@@ -61,8 +61,8 @@ func BenchmarkDatabaseFunctionMoneyTransfer(b *testing.B) {
 	defer svc.db.Close()
 	var err error
 	ctx := context.Background()
-	// errgrp := errgroup.Group{}
 	for i := 0; i < b.N; i++ {
+		// errgrp := errgroup.Group{}
 		// errgrp.Go(func() error { return svc.TransferMoneyDBFunction(ctx, 1, 2, 1) })
 		// errgrp.Go(func() error { return svc.TransferMoneyDBFunction(ctx, 2, 1, 1) })
 		// err = errgrp.Wait()

@@ -44,12 +44,17 @@
     - [OR clause](#or-clause)
     - [COUNT(\*)](#count)
     - [JOINS](#joins)
+    - [GROUPING SETS, CUBE, ROLLUP](#grouping-sets-cube-rollup)
     - [GROUP BY](#group-by)
     - [SET OPERATIONS](#set-operations)
     - [FILTER](#filter)
+    - [OFFSET](#offset)
     - [PARTITIONING](#partitioning)
     - [Flowchart](#flowchart)
   - [Extensions:](#extensions)
+  - [Comments](#comments)
+  - [Crypto](#crypto)
+  - [Full Text Search](#full-text-search)
   - [Other](#other)
 
 # postgresql-notes
@@ -151,7 +156,10 @@ Cons: only pub-sub (no queue) and might be harder to debug.
 
 
 Postgres queue has a default size of 8GB and is where all NOTIFY command messages are stored, along with the PID of the sender.
-Use `pg_listening_channels()` to get a list of listeners, `pg_notification_queue_usage()` to get a percentage of unprocessed messages
+Use `pg_listening_channels()` to get a list of listeners, `pg_notification_queue_usage()` to get a percentage of unprocessed messages.
+
+Use **SELECT FOR UPDATE SKIP LOCKED** to lock the row of the task and to allow other transactions to skip the lock check.
+
 
 ## Json with CTE
 
@@ -348,6 +356,9 @@ select seq from generate_series(3.2, 0.7, -0.3) t(seq);
 
 select seq from generate_series(timestamp '2000-01-01 00:00', timestamp '2000-01-01 23:00', interval '1 hour') as t(seq);
 select seq from generate_series(timestamp '2000-01-01 00:00', timestamp '2000-01-01 01:00', interval '1 minute') as t(seq);
+
+select * from generate_series(1, 3) as a, generate_series(5, 7) as b; -- cross joins
+select generate_series(1, 3) as a, generate_series(5, 7) as b; -- zips
 ```
 
 
@@ -547,6 +558,8 @@ https://gist.github.com/IllusiveMilkman/70c319d60756b78dc11366ffdb5127b3
 
 https://www.postgresql.org/docs/current/functions-window.html
 
+https://learnsql.com/blog/sql-window-functions-cheat-sheet/
+
 ```sql
 select
 *,
@@ -689,6 +702,12 @@ RANGE is default for ORDER BY (within the Partition): **if there is no ORDER BY 
 
 **if in RANGE mode and with ORDER BY then the CURRENT ROW also contain all the other previous/next rows that share the same value of the ORDER BY column**
 
+
+**PRECEDING** and **FOLLOWING** can also use intervals (if same data type as ORDER BY column):
+
+```sql
+SELECT *, array_agg(points) OVER (ORDER BY d RANGE BETWEEN '6 months' PRECEDING AND CURRENT ROW);
+```
 
 ```sql
 SELECT 	*,
@@ -939,6 +958,9 @@ https://www.postgresql.org/docs/current/errcodes-appendix.html
 https://www.postgresql.org/docs/current/plpgsql-statements.html
 
 ### Function:
+* VOLATILE: can return different output given the same inputs within the same transaction (can't be optimized by Postgres)
+* STABLE: will return the same output given the same inputs within the same transaction
+* IMMUTABLE: will return the same output given the same inputs
 * (usually) have return values (scalar like int, text, varchar or composite like row {fixed structure}, record {not fixed structure} or void return or declared as function parameters)
 * single transaction
 * can be executed with select
@@ -1446,6 +1468,9 @@ https://www.citusdata.com/blog/2019/03/29/health-checks-for-your-postgres-databa
 -- check current query and query_start
 select * from pg_stat_activity;
 
+-- If a query is stuck then get the pid from the above query and run
+select pg_terminate_backend(your_pid);
+
 -- Transactions
 select * from pg_stat_database;
 
@@ -1475,6 +1500,29 @@ select * from pg_settings;
 
 -- Table size
 select pg_relation_size('bookings');
+
+-- returns the size for each table
+SELECT schemaname || '.' || relname,
+       pg_size_pretty(pg_table_size(schemaname || '.' || relname)) as size
+  FROM pg_stat_user_tables
+order by pg_table_size(schemaname || '.' || relname) desc
+;
+
+-- Table + Index size
+SELECT    CONCAT(n.nspname,'.', c.relname) AS table,
+          i.relname AS index_name, pg_size_pretty(pg_relation_size(x.indrelid)) AS table_size,
+          pg_size_pretty(pg_relation_size(x.indexrelid)) AS index_size,
+          pg_size_pretty(pg_total_relation_size(x.indrelid)) AS total_size
+FROM pg_class c
+JOIN      pg_index x ON c.oid = x.indrelid
+JOIN      pg_class i ON i.oid = x.indexrelid
+LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE     c.relkind = ANY (ARRAY['r', 't'])
+AND       n.oid NOT IN (99, 11, 12375);
+
+-- Index Definitions for a table
+SELECT pg_get_indexdef(indexrelid) AS index_query
+FROM   pg_index WHERE  indrelid = 'bookings'::regclass;
 
 select quote_ident(table_schema)||'.'||quote_ident(table_name) as name
 ,pg_relation_size(quote_ident(table_schema) || '.' || quote_ident(table_name)) as size
@@ -1538,6 +1586,22 @@ WHERE C.relkind IN ('r', 't', 'm')
  AND N.nspname NOT LIKE 'pg_toast%'
 ORDER BY av_needed DESC, n_dead_tup DESC;
 
+-- Index Size
+SELECT schemaname || '.' || indexrelname,
+       pg_size_pretty(pg_total_relation_size(indexrelid))
+  FROM pg_stat_user_indexes
+  order by pg_total_relation_size(indexrelid) desc
+  ;
+
+-- Index usage
+SELECT s.relname AS table_name,
+       indexrelname AS index_name,
+       i.indisunique,
+       idx_scan AS index_scans
+FROM   pg_catalog.pg_stat_user_indexes s,
+       pg_index i
+WHERE  i.indexrelid = s.indexrelid;
+
 -- Bloated index:
 SELECT
  nspname,relname,
@@ -1565,6 +1629,38 @@ FROM
 RIGHT JOIN pg_statio_user_tables statio
 ON stat.relid=statio.relid;
 
+-- Also index usage:
+SELECT
+    t.schemaname,
+    t.tablename,
+    c.reltuples::bigint                            AS num_rows,
+    pg_size_pretty(pg_relation_size(c.oid))        AS table_size,
+    psai.indexrelname                              AS index_name,
+    pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size,
+    CASE WHEN i.indisunique THEN 'Y' ELSE 'N' END  AS "unique",
+    psai.idx_scan                                  AS number_of_scans,
+    psai.idx_tup_read                              AS tuples_read,
+    psai.idx_tup_fetch                             AS tuples_fetched
+FROM
+    pg_tables t
+    LEFT JOIN pg_class c ON t.tablename = c.relname
+    LEFT JOIN pg_index i ON c.oid = i.indrelid
+    LEFT JOIN pg_stat_all_indexes psai ON i.indexrelid = psai.indexrelid
+WHERE
+    t.schemaname NOT IN ('pg_catalog', 'information_schema')
+ORDER BY 1, 2;
+
+-- Duplicate Indexes:
+SELECT pg_size_pretty(sum(pg_relation_size(idx))::bigint) as size,
+       (array_agg(idx))[1] as idx1, (array_agg(idx))[2] as idx2,
+       (array_agg(idx))[3] as idx3, (array_agg(idx))[4] as idx4
+FROM (
+    SELECT indexrelid::regclass as idx, (indrelid::text ||E'\n'|| indclass::text ||E'\n'|| indkey::text ||E'\n'||
+                                         coalesce(indexprs::text,'')||E'\n' || coalesce(indpred::text,'')) as key
+    FROM pg_index) sub
+GROUP BY key HAVING count(*)>1
+ORDER BY sum(pg_relation_size(idx)) DESC;
+
 -- Invalid Indexes
 SELECT ir.relname AS indexname
 , it.relname AS tablename
@@ -1575,12 +1671,86 @@ JOIN pg_class it ON it.oid = i.indrelid
 JOIN pg_namespace n ON n.oid = it.relnamespace
 WHERE NOT i.indisvalid;
 
+-- Index per table
+SELECT
+    pg_class.relname,
+    pg_size_pretty(pg_class.reltuples::bigint)            AS rows_in_bytes,
+    pg_class.reltuples                                    AS num_rows,
+    COUNT(*)                                              AS total_indexes,
+    COUNT(*) FILTER ( WHERE indisunique)                  AS unique_indexes,
+    COUNT(*) FILTER ( WHERE indnatts = 1 )                AS single_column_indexes,
+    COUNT(*) FILTER ( WHERE indnatts IS DISTINCT FROM 1 ) AS multi_column_indexes
+FROM
+    pg_namespace
+    LEFT JOIN pg_class ON pg_namespace.oid = pg_class.relnamespace
+    LEFT JOIN pg_index ON pg_class.oid = pg_index.indrelid
+WHERE
+    pg_namespace.nspname = 'public' AND
+    pg_class.relkind = 'r'
+GROUP BY pg_class.relname, pg_class.reltuples
+ORDER BY pg_class.reltuples DESC;
+
 -- Reset statistics
 select pg_stat_reset();
 
 -- reltuples -> n of rows, relpages -> n of pages (8K size each)
 SELECT relname,relpages,reltuples, round(reltuples / relpages) AS rows_per_page FROM pg_class WHERE relname='table_name';
 SELECT relname,relpages,reltuples, round(reltuples / relpages) AS rows_per_page FROM pg_class WHERE relname='index_name';
+
+-- Foreign key levels
+WITH RECURSIVE fkeys AS (
+   /* source and target tables for all foreign keys */
+   SELECT conrelid AS source,
+          confrelid AS target
+   FROM pg_constraint
+   WHERE contype = 'f'
+),
+tables AS (
+      (   /* all tables ... */
+          SELECT oid AS table_name,
+                 1 AS level,
+                 ARRAY[oid] AS trail,
+                 FALSE AS circular
+          FROM pg_class
+          WHERE relkind = 'r'
+            AND NOT relnamespace::regnamespace::text LIKE ANY
+                    (ARRAY['pg_catalog', 'information_schema', 'pg_temp_%'])
+       EXCEPT
+          /* ... except the ones that have a foreign key */
+          SELECT source,
+                 1,
+                 ARRAY[ source ],
+                 FALSE
+          FROM fkeys
+      )
+   UNION ALL
+      /* all tables with a foreign key pointing a table in the working set */
+      SELECT fkeys.source,
+             tables.level + 1,
+             tables.trail || fkeys.source,
+             tables.trail @> ARRAY[fkeys.source]
+      FROM fkeys
+         JOIN tables ON tables.table_name = fkeys.target
+      /*
+       * Stop when a table appears in the trail the third time.
+       * This way, we get the table once with "circular = TRUE".
+       */
+      WHERE cardinality(array_positions(tables.trail, fkeys.source)) < 2
+),
+ordered_tables AS (
+   /* get the highest level per table */
+   SELECT DISTINCT ON (table_name)
+          table_name,
+          level,
+          circular
+   FROM tables
+   ORDER BY table_name, level DESC
+)
+SELECT table_name::regclass,
+       level
+FROM ordered_tables
+WHERE NOT circular
+ORDER BY level, table_name;
 ```
 
 ## pgexercises
@@ -1629,6 +1799,12 @@ https://www.crunchydata.com/developers/playground/lateral-join
 
 https://stackoverflow.com/a/52671180
 
+https://www.cybertec-postgresql.com/en/understanding-lateral-joins-in-postgresql/
+
+https://www.depesz.com/2022/09/18/what-is-lateral-what-is-it-for-and-how-can-one-use-it/
+
+https://www.softwareandbooz.com/what-i-wish-i-had-known-about-postgresql/
+
 ```sql
 SELECT * FROM (
     SELECT id, name, created_at FROM companies WHERE created_at < '2018-01-01'
@@ -1673,6 +1849,8 @@ select * from information_schema.triggers
 order by action_timing desc, trigger_name
 ;
 ```
+
+**NOTE**: If the function returns NEW, the row will be inserted as expected. However, if you return NULL, the operation will be silently ignored. In case of a BEFORE trigger the row will not be inserted.
 
 To avoid a stack overflow use `pg_trigger_depth`
 
@@ -1802,11 +1980,17 @@ https://hakibenita.medium.com/be-careful-with-cte-in-postgresql-fca5e24d2119
 
 https://www.crunchydata.com/blog/with-queries-present-future-common-table-expressions
 
-CTEs are materialized so the planner can't fully optimize them
+https://habr.com/en/companies/postgrespro/articles/490228/
 
 
 
 ## Custom Operator
+
+```sql
+SELECT * FROM pg_operator;
+```
+
+https://www.timescale.com/blog/function-pipelines-building-functional-programming-into-postgresql-using-custom-operators/
 
 https://www.postgresql.org/docs/current/sql-createoperator.html
 
@@ -1936,6 +2120,18 @@ $body$ LANGUAGE plpgsql;
 
 ## Performance
 
+https://postgrespro.com/blog/pgsql/5968054
+
+https://hakibenita.com/sql-tricks-application-dba
+
+https://www.cybertec-postgresql.com/en/join-strategies-and-performance-in-postgresql/
+
+https://www.crunchydata.com/blog/postgres-query-optimization-left-join-vs-union-all
+
+https://wiki.postgresql.org/wiki/Don%27t_Do_This#Don.27t_use_NOT_IN
+
+https://www.cybertec-postgresql.com/en/subqueries-and-performance-in-postgresql/
+
 ### OR clause
 
 https://www.cybertec-postgresql.com/en/avoid-or-for-better-performance/
@@ -1970,6 +2166,19 @@ Count estimation (between -10% and +10%):
 SELECT reltuples FROM pg_catalog.pg_class WHERE relname = 'mytable';
 ```
 
+https://pganalyze.com/blog/5mins-postgres-limited-count
+
+Add **LIMIT 101** to speed up the count query if you are ok displaying either 0-100 or 100+ in your frontend.
+
+```sql
+SELECT count(*) AS count FROM (
+  SELECT 1
+    FROM my_table
+    WHERE -- ....
+  LIMIT 101
+) limited_count
+```
+
 ### JOINS
 
 Main point: reduce the size of the intermediate dataset
@@ -1981,6 +2190,19 @@ Semi-joins and Anti-joins (select ... where [not] exists (...) / where .. [not] 
 Force a specific join order by setting the join_collapse_limit parameter to 1.
 
 To reduce the size of hash table size (used in Hash Joins), only select the columns that are needed.
+
+
+|                  | Nested Loop Join           | Hash Join                    | Merge Join        |
+| ---------------- | -------------------------- | ---------------------------- | ----------------- |
+| Algorithm        | For each outer, scan inner | Hash inner, probe with outer | Sort, then merge  |
+| Helping Indexes  | Join keys of inner         | None                         | Both join keys    |
+| Good strategy if | Outer is small             | Hash fits in work_mem        | Both large tables |
+
+
+
+### GROUPING SETS, CUBE, ROLLUP
+
+https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-GROUPING-SETS
 
 
 ### GROUP BY
@@ -2028,6 +2250,7 @@ Use set operations to (sometimes) prompt an alternative execution plan and impro
 
 If the query aren't correlated with each other then thy can run in parallel.
 
+If you have two different queries you're UNIONing, you have to make sure to not have any data type coercions in order for subquery pull-up to work!
 
 ### FILTER
 
@@ -2067,6 +2290,33 @@ WHERE cf.passenger_id<5000000
 GROUP BY 1
  ) info USING (passenger_id)
 WHERE p.passenger_id<5000000
+```
+
+
+### OFFSET
+
+Avoid offset if it has to discard too many values.
+
+Offset can be used to force join order.
+
+```sql
+-- join a and b first, then the result with c
+SELECT b.b_id, a.value
+FROM a
+   JOIN b USING (a_id)
+   JOIN c USING (a_id)
+WHERE c.c_id < 300;
+
+-- join c and b first, then the result with a
+SELECT subq.b_id, a.value
+FROM a JOIN
+   (SELECT a_id, b.b_id, c.c_id
+    FROM b
+       JOIN c USING (a_id)
+    WHERE c.c_id < 300
+    OFFSET 0
+   ) AS subq
+      USING (a_id);
 ```
 
 ### PARTITIONING
@@ -2129,11 +2379,72 @@ INSERT INTO boarding_pass_part SELECT * from boarding_pass;
 ## Extensions:
 
 ```sql
+-- https://www.postgresql.org/docs/current/pgstatstatements.html
 SELECT * FROM pg_extension;
+-- https://www.postgresql.org/docs/current/auto-explain.html
+LOAD 'auto_explain';
 ```
 
 * [plprofiler](https://github.com/bigsql/plprofiler?tab=readme-ov-file)
 * [plpgsql_check](https://github.com/okbob/plpgsql_check?tab=readme-ov-file)
+* https://postgrespro.com/blog/company/5968040
+* https://postgrespro.com/blog/pgsql/5968054
+
+
+## Comments
+
+```sql
+-- Table and columns
+comment on table bookings is 'Bookings table';
+comment on column bookings.memid is 'Member ID associated with the bookings';
+select
+st.schemaname,
+st.relname as table_name,
+c.column_name,
+ pgd.*
+from pg_catalog.pg_statio_all_tables as st
+inner join pg_catalog.pg_description pgd on pgd.objoid = st.relid
+left join information_schema.columns c on (
+    pgd.objsubid   = c.ordinal_position and
+    c.table_schema = st.schemaname and
+    c.table_name   = st.relname
+);
+
+-- Trigger
+comment on trigger products_notify_event on products is 'Notify Trigger on Products';
+select
+st.tgname,
+ pgd.*
+from pg_catalog.pg_trigger as st
+inner join pg_catalog.pg_description pgd on pgd.objoid = st.oid
+;
+
+-- Function
+comment on function "assert" is 'Assert a condition. Raise Exception if false.';
+select
+st.proname,
+ pgd.*
+from pg_catalog.pg_proc as st
+inner join pg_catalog.pg_description pgd on pgd.objoid = st.oid
+;
+```
+
+
+## Crypto
+
+https://www.postgresql.org/docs/current/pgcrypto.html#AEN178870
+
+```sql
+create extension if not exists "pgcrypto";
+select crypt('my-super-secret-pw', gen_salt('bf'));
+-- $2a$06$kvVAUdwQj53a8oi1zZBWx.iVG3ywc7T54lm7.yttWkHKzI/sHIeVq
+select crypt('my-super-secret-pw', '$2a$06$kvVAUdwQj53a8oi1zZBWx.iVG3ywc7T54lm7.yttWkHKzI/sHIeVq') = '$2a$06$kvVAUdwQj53a8oi1zZBWx.iVG3ywc7T54lm7.yttWkHKzI/sHIeVq';
+```
+
+
+## Full Text Search
+
+https://www.crunchydata.com/blog/postgres-full-text-search-a-search-engine-in-a-database
 
 
 ## Other
@@ -2156,3 +2467,41 @@ CREATE TABLE people (
 * https://medium.com/avitotech/how-to-work-with-postgres-in-go-bad2dabd13e4
 * https://hakibenita.com/sql-dos-and-donts
 * https://www.cybertec-postgresql.com/en/abusing-postgresql-as-an-sql-beautifier/
+
+* Generate SQL commands to rename tables and columns
+
+```sql
+-- create table "MY_TABLE"("ID" serial primary key, "MY_COLUMN" integer);
+SELECT 'ALTER TABLE public.' || quote_ident(tablename) || ' RENAME TO ' || lower(quote_ident(tablename))
+FROM    pg_tables
+WHERE   schemaname = 'public' AND   tablename <> lower(tablename);
+
+SELECT   'ALTER TABLE ' || a.oid::regclass || ' RENAME COLUMN ' || quote_ident(attname)
+|| ' TO ' || lower(quote_ident(attname))
+FROM    pg_attribute AS b, pg_class AS a, pg_namespace AS c
+WHERE
+  relkind = 'r'
+  AND     c.oid = a.relnamespace
+  AND     a.oid = b.attrelid
+  AND     b.attname NOT IN ('xmin', 'xmax', 'oid', 'cmin', 'cmax', 'tableoid', 'ctid')
+  AND     a.oid > 16384
+  AND     nspname = 'public'
+  AND     lower(attname) != attname;
+```
+
+* https://www.depesz.com/2020/01/28/dont-do-these-things-in-postgresql/
+* https://www.cybertec-postgresql.com/en/postgresql-network-latency-does-make-a-big-difference/
+* https://www.graphile.org/postgraphile/postgresql-schema-design/
+* https://abdulyadi.wordpress.com/2020/04/07/parallel-query-inside-function/
+* https://www.2ndquadrant.com/en/blog/7-best-practice-tips-for-postgresql-bulk-data-loading/
+* https://www.2ndquadrant.com/en/blog/how-to-get-the-best-out-of-postgresql-logs/
+* https://pganalyze.com/blog/5mins-postgres-performance-in-lists-vs-any-operator-bind-parameters
+* https://www.softwareandbooz.com/advent-of-code-2022-with-postgresql-part1/
+* https://psql-tips.org/psql_tips_all.html
+
+* Consider Unlogged table for testing
+* https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-UNLOGGED
+* https://www.crunchydata.com/developers/playground
+
+
+<img src="./d2.svg"/>

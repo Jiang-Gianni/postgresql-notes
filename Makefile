@@ -21,3 +21,18 @@ logs:
 
 fc:
 	d2 img/optimizationFlowchart.d2 img/optimizationFlowchart.svg
+
+psql:
+	psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable -t -P linestyle=old-ascii
+
+d2f:
+	psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable -f d2.sql -t -P linestyle=old-ascii > d2.d2
+
+d2q:
+	psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable -f d2.sql -t -P linestyle=old-ascii
+
+d2:
+	d2 --layout=elk d2.d2 d2.svg
+
+mdf:
+	psql -d postgresql://root:my-secret-pw@localhost:5432/mydb?sslmode=disable -f md.sql -t -P linestyle=old-ascii > md.md
