@@ -2568,6 +2568,33 @@ alter table new_events rename to events;
 commit;
 ```
 
+
+* Sharding and IDs at Instagram:
+https://instagram-engineering.com/sharding-ids-at-instagram-1cf5a71e5a5c
+
+```sql
+-- 41 bits for time in milliseconds (gives us 41 years of IDs with a custom epoch)
+-- 13 bits that represent the logical shard ID
+-- 10 bits that represent an auto-incrementing sequence, modulus 1024. This means we can generate 1024 IDs, per shard, per millisecond
+CREATE OR REPLACE FUNCTION insta5.next_id(OUT result bigint) AS $$
+DECLARE
+    our_epoch bigint := 1314220021721;
+-- SELECT EXTRACT(EPOCH FROM date '2024-10-27');
+-- select to_timestamp(1314220021721 / 1000);
+-- returns 2011-08-24 21:07:01+00
+    seq_id bigint;
+    now_millis bigint;
+    shard_id int := 5;
+BEGIN
+    SELECT nextval('insta5.table_id_seq') %% 1024 INTO seq_id;
+    SELECT FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) INTO now_millis;
+    result := (now_millis - our_epoch) << 23;
+    result := result | (shard_id <<10);
+    result := result | (seq_id);
+END;
+    $$ LANGUAGE PLPGSQL;
+```
+
 * https://www.depesz.com/2020/01/28/dont-do-these-things-in-postgresql/
 * https://www.cybertec-postgresql.com/en/postgresql-network-latency-does-make-a-big-difference/
 * https://www.graphile.org/postgraphile/postgresql-schema-design/
